@@ -1,6 +1,17 @@
-# Millenium wine ratings scraper
+# RateMyWine – collecte programmatique de notes critiques
 
-Script Python pour parcourir la section **"Tous nos vins"** d'un site, suivre les liens internes page par page, et récupérer les notations détectées sur les pages produits.
+Ce dépôt contient un script Python pour **automatiser la récupération de notes** (Parker, Hachette, etc.) à partir d'une liste de vins.
+
+> ⚠️ Important : vérifiez les CGU/robots.txt des sites interrogés avant un usage intensif.
+
+## Fonctionnement
+
+Le script :
+1. lit un CSV d'entrée (`domaine`, `appellation`, `millesime`),
+2. construit une requête de recherche web ciblant Millésima,
+3. récupère les pages candidats,
+4. extrait les notes des institutions via des patterns textuels,
+5. exporte un CSV enrichi.
 
 ## Installation
 
@@ -10,29 +21,39 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Utilisation
+## Format du CSV d'entrée
 
-```bash
-python3 millenium_wine_ratings_scraper.py "https://example.com/tous-nos-vins" \
-  --max-pages 500 \
-  --min-delay 1 \
-  --max-delay 2 \
-  --csv notes_vins.csv \
-  --json notes_vins.json
+Exemple :
+
+```csv
+domaine,appellation,millesime
+Chateau Margaux,Margaux,2015
+Domaine de la Romanee-Conti,Romanee-Conti,2018
 ```
 
-## Ce que fait le script
+## Exécution
 
-- Démarre depuis l'URL fournie (section "tous nos vins").
-- Explore les liens du même domaine uniquement.
-- Respecte une pause aléatoire de 1 à 2 secondes (configurable) entre chaque page.
-- Extrait les notes via:
-  - `application/ld+json` (`aggregateRating`) quand disponible.
-  - un fallback regex texte (formats de type `17/20`, `92/100`, etc.).
-- Exporte les résultats en CSV et JSON.
+```bash
+python3 scripts/collect_ratings.py --input wines.csv --output ratings.csv
+```
 
-## Remarques
+Options utiles :
 
-- Adapte `--max-pages` selon la taille du site.
-- Le script ne contourne pas les protections anti-bot.
-- Vérifie les CGU/robots.txt du site ciblé avant scraping.
+- `--max-results 5` : nombre de liens candidats testés par vin.
+- `--sleep 1.2` : pause (secondes) entre requêtes HTTP.
+- `--timeout 15` : timeout HTTP.
+
+## Sortie
+
+Le CSV de sortie contient :
+
+- colonnes d'origine,
+- `best_url` : URL où une note a été trouvée,
+- `ratings_json` : notes trouvées (JSON compact),
+- `status` : `ok` / `no-rating-found` / `no-candidate-page`.
+
+## Prochaines améliorations
+
+- Ajouter des connecteurs API officiels (quand disponibles).
+- Introduire un matching fuzzy (nom de cuvée précis).
+- Ajouter un mode Playwright pour les pages dynamiques JavaScript.

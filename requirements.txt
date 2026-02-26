@@ -1,1 +1,1 @@
-# No external dependencies required.
+# Aucune dépendance externe: script compatible Python standard library.
