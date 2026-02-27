@@ -47,12 +47,21 @@ public final class MilleniumWineRatingsScraper {
     private static final Pattern REL_NEXT_LINK_RE = Pattern.compile(
             "<link[^>]*rel=[\"']next[\"'][^>]*href=[\"']([^\"'#]+)[\"'][^>]*>|<link[^>]*href=[\"']([^\"'#]+)[\"'][^>]*rel=[\"']next[\"'][^>]*>",
             Pattern.CASE_INSENSITIVE);
-    private static final Pattern WINE_DETAIL_PATH_RE = Pattern.compile(".+-(?:19|20)\\d{2}(?:-\\d+)?\\.html$", Pattern.CASE_INSENSITIVE);
+    private static final Pattern WINE_DETAIL_PATH_RE = Pattern.compile(
+            ".+-(?:19|20)\\d{2}(?:-[a-z0-9]+)*\\.html$",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern WINE_DETAIL_CANONICAL_PATH_RE = Pattern.compile(
+            "^(.+-(?:19|20)\\d{2})(?:-[a-z0-9]+)*\\.html$",
+            Pattern.CASE_INSENSITIVE);
     private static final Pattern LISTING_ENCODED_WINE_URL_RE = Pattern.compile(
-            "&#34;url&#34;:\\s*&#34;(https?://[^&\\s]+-(?:19|20)\\d{2}(?:-\\d+)?\\.html)&#34;",
+            "&#34;url&#34;:\\s*&#34;(https?://[^&\\s]+-(?:19|20)\\d{2}(?:-[a-z0-9]+)*\\.html)&#34;",
             Pattern.CASE_INSENSITIVE);
     private static final Pattern LISTING_DIRECT_WINE_URL_RE = Pattern.compile(
-            "\"url\"\\s*:\\s*\"(https?://[^\"\\s]+-(?:19|20)\\d{2}(?:-\\d+)?\\.html)\"",
+            "\"url\"\\s*:\\s*\"(https?://[^\"\\s]+-(?:19|20)\\d{2}(?:-[a-z0-9]+)*\\.html)\"",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern VINTAGE_SECTION_LINK_RE = Pattern.compile(
+            "<a[^>]*aria-label=[\"']((?:19|20)\\d{2})[\"'][^>]*href=[\"']([^\"'#]+)[\"'][^>]*>|"
+                    + "<a[^>]*href=[\"']([^\"'#]+)[\"'][^>]*aria-label=[\"']((?:19|20)\\d{2})[\"'][^>]*>",
             Pattern.CASE_INSENSITIVE);
     private static final Pattern CRITIC_SLIDE_RE = Pattern.compile(
             "<div[^>]*WineCriticSlide_container__[^>]*>.*?<span[^>]*WineCriticSlide_name__[^>]*>(.*?)</span>.*?<span[^>]*WineCriticSlide_rating__[^>]*>(.*?)</span>",
@@ -120,7 +129,8 @@ public final class MilleniumWineRatingsScraper {
         URI start = URI.create(cli.startUrl);
         String domain = start.getHost();
         Queue<String> queue = new ArrayDeque<>();
-        queue.add(trimTrailingSlash(cli.startUrl));
+        String normalizedStartUrl = normalizeUrl(cli.startUrl, cli.startUrl);
+        queue.add(normalizedStartUrl == null ? trimTrailingSlash(cli.startUrl) : normalizedStartUrl);
         Set<String> seenUrls = new HashSet<>();
         List<WineRating> ratings = new ArrayList<>();
         Random random = new Random();
@@ -451,6 +461,9 @@ public final class MilleniumWineRatingsScraper {
     private static Set<String> extractInternalLinks(String html, String baseUrl, String domain) {
         Set<String> links = new LinkedHashSet<>();
         if (!isLikelyListingPage(baseUrl, html)) {
+            if (isLikelyWineDetailPath(URI.create(baseUrl).getPath())) {
+                links.addAll(extractWineVintageLinks(html, baseUrl, domain));
+            }
             return links;
         }
 
@@ -497,6 +510,140 @@ public final class MilleniumWineRatingsScraper {
             }
         }
         return links;
+    }
+
+    private static Set<String> extractWineVintageLinks(String html, String baseUrl, String domain) {
+        Set<String> links = new LinkedHashSet<>();
+        URI baseUri = URI.create(baseUrl);
+        String basePath = baseUri.getPath();
+        String wineFamily = extractWineFamily(basePath);
+        if (wineFamily == null) {
+            return links;
+        }
+
+        links.addAll(extractVintageLinksFromVintageBox(html, baseUrl, domain, wineFamily));
+        if (!links.isEmpty()) {
+            return links;
+        }
+
+        String decodedHtml = decodeUrlToken(html);
+        Pattern familyVintagePathRe = Pattern.compile(
+                "(?i)(?:https?://[^\"'\\s<>]+/|/)?"
+                        + Pattern.quote(wineFamily)
+                        + "-(?:19|20)\\d{2}(?:-[a-z0-9]+)*\\.html");
+        Matcher matcher = familyVintagePathRe.matcher(decodedHtml);
+        while (matcher.find()) {
+            String token = matcher.group();
+            if (!token.startsWith("http://") && !token.startsWith("https://") && !token.startsWith("/")) {
+                token = "/" + token;
+            }
+            String normalized = normalizeUrl(baseUrl, token);
+            if (normalized == null) {
+                continue;
+            }
+            URI uri = URI.create(normalized);
+            if (uri.getHost() != null
+                    && uri.getHost().equalsIgnoreCase(domain)
+                    && isLikelyWineDetailPath(uri.getPath())
+                    && isSameWineFamily(uri.getPath(), wineFamily)) {
+                links.add(normalized);
+            }
+        }
+        return links;
+    }
+
+    private static Set<String> extractVintageLinksFromVintageBox(String html, String baseUrl, String domain, String wineFamily) {
+        Set<String> links = new LinkedHashSet<>();
+        String decodedHtml = decodeUrlToken(html);
+        String lowerHtml = decodedHtml.toLowerCase(Locale.ROOT);
+        int searchFrom = 0;
+        while (searchFrom < lowerHtml.length()) {
+            int containerIdx = lowerHtml.indexOf("productvintagebox_container__", searchFrom);
+            if (containerIdx < 0) {
+                break;
+            }
+            int sectionStart = lowerHtml.lastIndexOf("<div", containerIdx);
+            if (sectionStart < 0) {
+                sectionStart = containerIdx;
+            }
+            int sectionEnd = findVintageBoxSectionEnd(lowerHtml, containerIdx);
+            if (sectionEnd <= sectionStart) {
+                searchFrom = containerIdx + 1;
+                continue;
+            }
+            String sectionHtml = decodedHtml.substring(sectionStart, sectionEnd);
+            Matcher sectionLinks = VINTAGE_SECTION_LINK_RE.matcher(sectionHtml);
+            while (sectionLinks.find()) {
+                String year = firstNonBlank(sectionLinks.group(1), sectionLinks.group(4));
+                String href = firstNonBlank(sectionLinks.group(2), sectionLinks.group(3));
+                if (year == null || href == null) {
+                    continue;
+                }
+                String normalized = normalizeUrl(baseUrl, href);
+                if (normalized == null) {
+                    continue;
+                }
+                URI uri = URI.create(normalized);
+                if (uri.getHost() != null
+                        && uri.getHost().equalsIgnoreCase(domain)
+                        && isLikelyWineDetailPath(uri.getPath())
+                        && isSameWineFamily(uri.getPath(), wineFamily)
+                        && uri.getPath().contains("-" + year)) {
+                    links.add(normalized);
+                }
+            }
+            searchFrom = sectionEnd;
+        }
+        return links;
+    }
+
+    private static int findVintageBoxSectionEnd(String lowerHtml, int sectionStart) {
+        int end = lowerHtml.length();
+        int[] markers = new int[] {
+                lowerHtml.indexOf("productvintagebox_brand-label-link__", sectionStart),
+                lowerHtml.indexOf("productview_global-layout__", sectionStart),
+                lowerHtml.indexOf("productnotation_title__", sectionStart),
+                lowerHtml.indexOf("productvintagebox_container__", sectionStart + 1)
+        };
+        for (int marker : markers) {
+            if (marker > sectionStart && marker < end) {
+                end = marker;
+            }
+        }
+        int safetyCap = Math.min(lowerHtml.length(), sectionStart + 20_000);
+        return Math.min(end, safetyCap);
+    }
+
+    private static String extractWineFamily(String path) {
+        if (!isLikelyWineDetailPath(path)) {
+            return null;
+        }
+        String normalizedPath = path.startsWith("/") ? path.substring(1) : path;
+        Matcher matcher = Pattern.compile("^(.+)-(?:19|20)\\d{2}(?:-[a-z0-9]+)*\\.html$", Pattern.CASE_INSENSITIVE)
+                .matcher(normalizedPath);
+        if (!matcher.matches()) {
+            return null;
+        }
+        return matcher.group(1);
+    }
+
+    private static boolean isSameWineFamily(String path, String family) {
+        if (path == null || family == null) {
+            return false;
+        }
+        String normalizedPath = path.startsWith("/") ? path.substring(1) : path;
+        return normalizedPath.toLowerCase(Locale.ROOT)
+                .matches(Pattern.quote(family.toLowerCase(Locale.ROOT)) + "-(?:19|20)\\d{2}(?:-[a-z0-9]+)*\\.html");
+    }
+
+    private static String decodeUrlToken(String rawUrl) {
+        return rawUrl
+                .replace("\\/", "/")
+                .replace("\\u002F", "/")
+                .replace("&#x2F;", "/")
+                .replace("&#47;", "/")
+                .replace("&quot;", "\"")
+                .replace("&#34;", "\"");
     }
 
     private static boolean isLikelyListingPage(String url, String html) {
@@ -567,11 +714,26 @@ public final class MilleniumWineRatingsScraper {
             if (!scheme.equals("http") && !scheme.equals("https")) {
                 return null;
             }
-            URI cleaned = new URI(absolute.getScheme(), absolute.getAuthority(), absolute.getPath(), absolute.getQuery(), null);
+            boolean wineDetailPath = isLikelyWineDetailPath(absolute.getPath());
+            String normalizedPath = wineDetailPath ? canonicalizeWineDetailPath(absolute.getPath()) : absolute.getPath();
+            String query = wineDetailPath ? null : absolute.getQuery();
+            URI cleaned = new URI(absolute.getScheme(), absolute.getAuthority(), normalizedPath, query, null);
             return trimTrailingSlash(cleaned.toString());
         } catch (IllegalArgumentException | URISyntaxException e) {
             return null;
         }
+    }
+
+    private static String canonicalizeWineDetailPath(String path) {
+        if (path == null || path.isBlank()) {
+            return path;
+        }
+        String normalizedPath = path.startsWith("/") ? path.substring(1) : path;
+        Matcher matcher = WINE_DETAIL_CANONICAL_PATH_RE.matcher(normalizedPath);
+        if (!matcher.matches()) {
+            return path;
+        }
+        return "/" + matcher.group(1) + ".html";
     }
 
     private static String stripTags(String text) {

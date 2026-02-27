@@ -11,9 +11,11 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.OffsetDateTime;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
@@ -55,18 +57,30 @@ class MilleniaLiveWebPostgresTest {
                     + "<link[^>]*href=[\"']([^\"'#]+)[\"'][^>]*rel=[\"']next[\"'][^>]*>",
             Pattern.CASE_INSENSITIVE);
     private static final Pattern LISTING_ENCODED_WINE_URL_RE = Pattern.compile(
-            "&#34;url&#34;:\\s*&#34;(https?://[^&\\s]+-(?:19|20)\\d{2}(?:-\\d+)?\\.html)&#34;",
+            "&#34;url&#34;:\\s*&#34;(https?://[^&\\s]+-(?:19|20)\\d{2}(?:-[a-z0-9]+)*\\.html)&#34;",
             Pattern.CASE_INSENSITIVE);
     private static final Pattern LISTING_DIRECT_WINE_URL_RE = Pattern.compile(
-            "\\\"url\\\"\\s*:\\s*\\\"(https?://[^\\\"\\s]+-(?:19|20)\\d{2}(?:-\\d+)?\\.html)\\\"",
+            "\\\"url\\\"\\s*:\\s*\\\"(https?://[^\\\"\\s]+-(?:19|20)\\d{2}(?:-[a-z0-9]+)*\\.html)\\\"",
             Pattern.CASE_INSENSITIVE);
     private static final Pattern LISTING_ESCAPED_WINE_URL_RE = Pattern.compile(
-            "\\\"url\\\"\\s*:\\s*\\\"(https?:\\\\/\\\\/[^\\\"\\s]+-(?:19|20)\\d{2}(?:-\\d+)?\\.html)\\\"",
+            "\\\"url\\\"\\s*:\\s*\\\"(https?:\\\\/\\\\/[^\\\"\\s]+-(?:19|20)\\d{2}(?:-[a-z0-9]+)*\\.html)\\\"",
             Pattern.CASE_INSENSITIVE);
     private static final Pattern WINE_DETAIL_PATH_RE = Pattern.compile(
-            ".+-(?:19|20)\\d{2}(?:-\\d+)?\\.html$",
+            ".+-(?:19|20)\\d{2}(?:-[a-z0-9]+)*\\.html$",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern WINE_DETAIL_CANONICAL_PATH_RE = Pattern.compile(
+            "^(.+-(?:19|20)\\d{2})(?:-[a-z0-9]+)*\\.html$",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern WINE_FAMILY_PATH_RE = Pattern.compile(
+            "^(.+)-(?:19|20)\\d{2}(?:-[a-z0-9]+)*\\.html$",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern VINTAGE_SECTION_LINK_RE = Pattern.compile(
+            "<a[^>]*aria-label=[\"']((?:19|20)\\d{2})[\"'][^>]*href=[\"']([^\"'#]+)[\"'][^>]*>|"
+                    + "<a[^>]*href=[\"']([^\"'#]+)[\"'][^>]*aria-label=[\"']((?:19|20)\\d{2})[\"'][^>]*>",
             Pattern.CASE_INSENSITIVE);
     private static final Pattern NUMERIC_RATING_RE = Pattern.compile("^\\d+(?:[.,]\\d+)?\\+?(?:/\\d+)?$");
+    private static final String LATOUR_MARTILLAC_REFERENCE_URL =
+            "https://www.millesima.fr/chateau-latour-martillac-2019.html";
 
     @Autowired
     private MilleniaScrapingService scrapingService;
@@ -158,11 +172,27 @@ class MilleniaLiveWebPostgresTest {
         Set<String> wineUrls = new LinkedHashSet<>();
         wineUrls.addAll(firstPageWineUrls);
         wineUrls.addAll(secondPageWineUrls);
+        Map<String, String> familySeedUrls = new LinkedHashMap<>();
+        for (String wineUrl : wineUrls) {
+            familySeedUrls.putIfAbsent(extractWineFamilyKey(wineUrl), canonicalizeWineDetailUrl(wineUrl));
+        }
 
         int changedRows = 0;
-        for (String wineUrl : wineUrls) {
-            changedRows += scrapingService.scrapeAndSync(wineUrl, 1);
+        for (String familySeedUrl : familySeedUrls.values()) {
+            changedRows += scrapingService.scrapeAndSync(familySeedUrl, 120);
         }
+
+        changedRows += scrapingService.scrapeAndSync(LATOUR_MARTILLAC_REFERENCE_URL, 120);
+        Set<String> expectedLatourUrls = extractVintageUrlsFromWinePage(
+                fetchHtml(LATOUR_MARTILLAC_REFERENCE_URL),
+                LATOUR_MARTILLAC_REFERENCE_URL
+        );
+        expectedLatourUrls.add(canonicalizeWineDetailUrl(LATOUR_MARTILLAC_REFERENCE_URL));
+        Set<String> persistedLatourUrls = milleniaRepository.findAllByPageUrlIn(expectedLatourUrls).stream()
+                .map(Millenia::getPageUrl)
+                .collect(java.util.stream.Collectors.toSet());
+        Assertions.assertEquals(expectedLatourUrls, persistedLatourUrls,
+                "Le scraper doit suivre tous les autres millesimes disponibles pour Chateau Latour-Martillac");
 
         int insertedMissingWineRows = ensureWineRowsExistInMillenia(wineUrls);
         List<Millenia> persistedRows = milleniaRepository.findAllByPageUrlIn(wineUrls);
@@ -329,7 +359,7 @@ class MilleniaLiveWebPostgresTest {
                 continue;
             }
             if (WINE_DETAIL_PATH_RE.matcher(uri.getPath()).matches()) {
-                target.add(normalized);
+                target.add(canonicalizeWineDetailUrl(normalized));
             }
         }
     }
@@ -339,7 +369,91 @@ class MilleniaLiveWebPostgresTest {
                 .replace("\\/", "/")
                 .replace("\\u002F", "/")
                 .replace("&#x2F;", "/")
-                .replace("&#47;", "/");
+                .replace("&#47;", "/")
+                .replace("&quot;", "\"")
+                .replace("&#34;", "\"");
+    }
+
+    private static Set<String> extractVintageUrlsFromWinePage(String wineHtml, String baseUrl) {
+        Set<String> vintageUrls = new LinkedHashSet<>();
+        String decodedHtml = decodeUrlToken(wineHtml);
+        String lowerHtml = decodedHtml.toLowerCase(Locale.ROOT);
+        int searchFrom = 0;
+        while (searchFrom < lowerHtml.length()) {
+            int containerIdx = lowerHtml.indexOf("productvintagebox_container__", searchFrom);
+            if (containerIdx < 0) {
+                break;
+            }
+            int sectionStart = lowerHtml.lastIndexOf("<div", containerIdx);
+            if (sectionStart < 0) {
+                sectionStart = containerIdx;
+            }
+            int sectionEnd = findVintageBoxSectionEnd(lowerHtml, containerIdx);
+            if (sectionEnd <= sectionStart) {
+                searchFrom = containerIdx + 1;
+                continue;
+            }
+            String sectionHtml = decodedHtml.substring(sectionStart, sectionEnd);
+            Matcher linksMatcher = VINTAGE_SECTION_LINK_RE.matcher(sectionHtml);
+            while (linksMatcher.find()) {
+                String href = firstNonBlank(linksMatcher.group(2), linksMatcher.group(3));
+                if (href == null) {
+                    continue;
+                }
+                String normalized = normalizeUrl(baseUrl, href);
+                if (normalized == null) {
+                    continue;
+                }
+                if (WINE_DETAIL_PATH_RE.matcher(URI.create(normalized).getPath()).matches()) {
+                    vintageUrls.add(canonicalizeWineDetailUrl(normalized));
+                }
+            }
+            searchFrom = sectionEnd;
+        }
+        return vintageUrls;
+    }
+
+    private static int findVintageBoxSectionEnd(String lowerHtml, int sectionStart) {
+        int end = lowerHtml.length();
+        int[] markers = new int[] {
+                lowerHtml.indexOf("productvintagebox_brand-label-link__", sectionStart),
+                lowerHtml.indexOf("productview_global-layout__", sectionStart),
+                lowerHtml.indexOf("productnotation_title__", sectionStart),
+                lowerHtml.indexOf("productvintagebox_container__", sectionStart + 1)
+        };
+        for (int marker : markers) {
+            if (marker > sectionStart && marker < end) {
+                end = marker;
+            }
+        }
+        int safetyCap = Math.min(lowerHtml.length(), sectionStart + 20_000);
+        return Math.min(end, safetyCap);
+    }
+
+    private static String canonicalizeWineDetailUrl(String url) {
+        try {
+            URI uri = URI.create(url);
+            String path = uri.getPath();
+            Matcher matcher = WINE_DETAIL_CANONICAL_PATH_RE.matcher(path.startsWith("/") ? path.substring(1) : path);
+            if (!matcher.matches()) {
+                return url;
+            }
+            URI canonical = new URI(uri.getScheme(), uri.getAuthority(), "/" + matcher.group(1) + ".html", null, null);
+            return canonical.toString();
+        } catch (IllegalArgumentException | URISyntaxException e) {
+            return url;
+        }
+    }
+
+    private static String extractWineFamilyKey(String wineUrl) {
+        URI uri = URI.create(wineUrl);
+        String path = uri.getPath() == null ? "" : uri.getPath();
+        String normalizedPath = path.startsWith("/") ? path.substring(1) : path;
+        Matcher matcher = WINE_FAMILY_PATH_RE.matcher(normalizedPath);
+        if (!matcher.matches()) {
+            return normalizedPath.toLowerCase(Locale.ROOT);
+        }
+        return matcher.group(1).toLowerCase(Locale.ROOT);
     }
 
     private static String firstNonBlank(String... values) {

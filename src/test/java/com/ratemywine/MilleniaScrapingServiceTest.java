@@ -27,10 +27,23 @@ import org.springframework.boot.test.context.SpringBootTest;
 @SpringBootTest
 class MilleniaScrapingServiceTest {
     private static final Pattern LISTING_ENCODED_WINE_URL_RE = Pattern.compile(
-            "&#34;url&#34;:\\s*&#34;(https://www\\.millesima\\.fr/[^&\\s]+-(?:19|20)\\d{2}(?:-\\d+)?\\.html)&#34;"
+            "&#34;url&#34;:\\s*&#34;(https://www\\.millesima\\.fr/[^&\\s]+-(?:19|20)\\d{2}(?:-[a-z0-9]+)*\\.html)&#34;"
     );
+    private static final Pattern CANONICAL_WINE_PATH_RE = Pattern.compile(
+            "^/(.+-(?:19|20)\\d{2})(?:-[a-z0-9]+)*\\.html$",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern VINTAGE_FROM_PATH_RE = Pattern.compile(
+            "((?:19|20)\\d{2})(?:-[a-z0-9]+)*\\.html$",
+            Pattern.CASE_INSENSITIVE);
 
     private static final String PAGE_2_WINE_PATH = "/chateau-lynch-bages-2016.html";
+    private static final String PEYRABON_START_SUFFIX_PATH = "/chateau-peyrabon-2024-e-cb-1.html";
+    private static final String PEYRABON_START_CANONICAL_PATH = "/chateau-peyrabon-2024.html";
+    private static final String PEYRABON_FAMILY_SLUG = "chateau-peyrabon";
+    private static final Set<Integer> EXPECTED_PEYRABON_VINTAGES = Set.of(
+            2023, 2022, 2021, 2020, 2019, 2017, 2016, 2015, 2014, 2013, 2012,
+            2011, 2010, 2009, 2008, 2006, 2004, 2002, 2001, 2000, 1999, 1998
+    );
 
     @Autowired
     private MilleniaScrapingService scrapingService;
@@ -41,8 +54,12 @@ class MilleniaScrapingServiceTest {
     private HttpServer server;
     private int firstPageWineEntriesCount;
     private Set<String> firstPageWinePaths;
+    private Set<String> additionalVintageWinePaths;
     private String allWinesHtmlTemplate;
     private String sampleWinePageHtml;
+    private String peyrabonPageHtml;
+    private Set<String> peyrabonRawWinePaths;
+    private Set<String> peyrabonCanonicalWinePaths;
     private String baseUrl;
     private String startUrl;
 
@@ -51,13 +68,27 @@ class MilleniaScrapingServiceTest {
         milleniaRepository.deleteAll();
         allWinesHtmlTemplate = readResource("allWines.html");
         sampleWinePageHtml = readResource("sampleWinePage.html");
+        peyrabonPageHtml = readResource("peyrabon.html");
         ListingPageWines firstPageWines = extractFirstPageWines(allWinesHtmlTemplate);
         firstPageWineEntriesCount = firstPageWines.entriesCount();
-        firstPageWinePaths = firstPageWines.uniqueWinePaths();
+        firstPageWinePaths = canonicalizeWinePaths(firstPageWines.uniqueWinePaths());
+        additionalVintageWinePaths = extractWineFamilyVintagePaths(sampleWinePageHtml, "chateau-lynch-bages");
+        peyrabonRawWinePaths = extractWineFamilyVintagePathsRaw(peyrabonPageHtml, PEYRABON_FAMILY_SLUG);
+        peyrabonCanonicalWinePaths = canonicalizeWinePaths(peyrabonRawWinePaths);
+        additionalVintageWinePaths.remove(PAGE_2_WINE_PATH);
+        additionalVintageWinePaths.removeAll(firstPageWinePaths);
+        peyrabonCanonicalWinePaths.remove(PEYRABON_START_CANONICAL_PATH);
+        Set<Integer> peyrabonFixtureVintages = peyrabonCanonicalWinePaths.stream()
+                .map(MilleniaScrapingServiceTest::extractVintageFromPath)
+                .collect(Collectors.toSet());
 
         Assertions.assertEquals(45, firstPageWineEntriesCount, "Fixture allWines must contain 45 wine entries");
         Assertions.assertTrue(firstPageWinePaths.size() >= 44, "Fixture should contain at least 44 unique wine URLs");
         Assertions.assertFalse(firstPageWinePaths.contains(PAGE_2_WINE_PATH));
+        Assertions.assertFalse(additionalVintageWinePaths.isEmpty(),
+                "Fixture sampleWinePage should expose additional vintage links");
+        Assertions.assertEquals(EXPECTED_PEYRABON_VINTAGES, peyrabonFixtureVintages,
+                "Fixture peyrabon should expose all expected millesimes");
 
         server = HttpServer.create(new InetSocketAddress(0), 0);
         server.createContext("/", exchange -> {
@@ -72,8 +103,17 @@ class MilleniaScrapingServiceTest {
                 respond(exchange, allWinesHtmlTemplate.replace("https://www.millesima.fr", baseUrl));
                 return;
             }
-            if (firstPageWinePaths.contains(path) || PAGE_2_WINE_PATH.equals(path)) {
+            if (firstPageWinePaths.contains(path)
+                    || PAGE_2_WINE_PATH.equals(path)
+                    || additionalVintageWinePaths.contains(path)) {
                 respond(exchange, sampleWinePageHtml);
+                return;
+            }
+            if (PEYRABON_START_SUFFIX_PATH.equals(path)
+                    || PEYRABON_START_CANONICAL_PATH.equals(path)
+                    || peyrabonRawWinePaths.contains(path)
+                    || peyrabonCanonicalWinePaths.contains(path)) {
+                respond(exchange, peyrabonPageHtml.replace("https://www.millesima.fr", baseUrl));
                 return;
             }
             exchange.sendResponseHeaders(404, -1);
@@ -94,9 +134,9 @@ class MilleniaScrapingServiceTest {
 
     @Test
     void scrapeAllWinesReads45Page1NavigatesPage2AndParsesNineLynchBagesRatings() throws InterruptedException {
-        int changedFirstRun = scrapingService.scrapeAndSync(startUrl, 60);
+        int changedFirstRun = scrapingService.scrapeAndSync(startUrl, 120);
 
-        long expectedWinePages = firstPageWinePaths.size() + 1L;
+        long expectedWinePages = firstPageWinePaths.size() + 1L + additionalVintageWinePaths.size();
         Assertions.assertEquals(expectedWinePages, changedFirstRun);
         Assertions.assertEquals(expectedWinePages, milleniaRepository.count());
 
@@ -109,6 +149,12 @@ class MilleniaScrapingServiceTest {
                 .count();
         Assertions.assertEquals((long) firstPageWinePaths.size(), firstPageScraped);
         Assertions.assertTrue(scrapedUrls.contains(baseUrl + PAGE_2_WINE_PATH));
+        long additionalVintagesScraped = additionalVintageWinePaths.stream()
+                .map(path -> baseUrl + path)
+                .filter(scrapedUrls::contains)
+                .count();
+        Assertions.assertEquals((long) additionalVintageWinePaths.size(), additionalVintagesScraped,
+                "Le scraper doit suivre les liens de tous les millesimes depuis la page vin");
 
         Millenia lynchBages = milleniaRepository.findFirstByPageUrl(baseUrl + PAGE_2_WINE_PATH)
                 .orElseThrow();
@@ -121,11 +167,39 @@ class MilleniaScrapingServiceTest {
         Assertions.assertEquals(9, countFilledRatings(lynchBages));
 
         OffsetDateTime lynchBagesScrapedAt = lynchBages.getScrapedAt();
-        int changedSecondRun = scrapingService.scrapeAndSync(startUrl, 60);
+        int changedSecondRun = scrapingService.scrapeAndSync(startUrl, 120);
         Assertions.assertEquals(0, changedSecondRun);
         Millenia lynchBagesReloaded = milleniaRepository.findFirstByPageUrl(baseUrl + PAGE_2_WINE_PATH)
                 .orElseThrow();
         Assertions.assertEquals(lynchBagesScrapedAt, lynchBagesReloaded.getScrapedAt());
+    }
+
+    @Test
+    void scrapePeyrabonFromSuffixUrlFindsAllExpectedVintages() throws InterruptedException {
+        int changedRows = scrapingService.scrapeAndSync(baseUrl + PEYRABON_START_SUFFIX_PATH, 120);
+
+        Set<String> scrapedUrls = milleniaRepository.findAll().stream()
+                .map(Millenia::getPageUrl)
+                .collect(Collectors.toSet());
+        Set<String> unexpectedUrls = scrapedUrls.stream()
+                .filter(url -> !url.contains("/chateau-peyrabon-"))
+                .collect(Collectors.toSet());
+        Set<Integer> scrapedPeyrabonVintages = scrapedUrls.stream()
+                .filter(url -> url.contains("/chateau-peyrabon-"))
+                .map(MilleniaScrapingServiceTest::extractVintageFromUrl)
+                .filter(EXPECTED_PEYRABON_VINTAGES::contains)
+                .collect(Collectors.toSet());
+
+        Assertions.assertTrue(unexpectedUrls.isEmpty(),
+                "Le scraper ne doit pas suivre les liens d'autres sections (ex: du meme producteur)");
+        Assertions.assertTrue(scrapedUrls.contains(baseUrl + PEYRABON_START_CANONICAL_PATH),
+                "Le scraper doit canoniser les URLs suffixees vers la page millesime");
+        Assertions.assertEquals(EXPECTED_PEYRABON_VINTAGES.size() + 1, scrapedUrls.size(),
+                "Le scraper doit persister uniquement le millesime de depart et ses autres millesimes");
+        Assertions.assertEquals(EXPECTED_PEYRABON_VINTAGES, scrapedPeyrabonVintages,
+                "Le scraper doit suivre tous les millesimes de la page Peyrabon");
+        Assertions.assertEquals(EXPECTED_PEYRABON_VINTAGES.size() + 1, changedRows,
+                "Le run doit persister uniquement les pages de millesimes attendues");
     }
 
     private static int countFilledRatings(Millenia row) {
@@ -187,6 +261,49 @@ class MilleniaScrapingServiceTest {
             paths.add(URI.create(matcher.group(1)).getPath());
         }
         return new ListingPageWines(entries, paths);
+    }
+
+    private static Set<String> extractWineFamilyVintagePaths(String html, String wineFamilySlug) {
+        return canonicalizeWinePaths(extractWineFamilyVintagePathsRaw(html, wineFamilySlug));
+    }
+
+    private static Set<String> extractWineFamilyVintagePathsRaw(String html, String wineFamilySlug) {
+        Pattern familyVintageRe = Pattern.compile(
+                "(?i)(?:https?://www\\.millesima\\.fr/)?("
+                        + Pattern.quote(wineFamilySlug)
+                        + "-(?:19|20)\\d{2}(?:-[a-z0-9]+)*\\.html)");
+        Matcher matcher = familyVintageRe.matcher(html.replace("\\/", "/"));
+        Set<String> paths = new LinkedHashSet<>();
+        while (matcher.find()) {
+            paths.add("/" + matcher.group(1).toLowerCase());
+        }
+        return paths;
+    }
+
+    private static Set<String> canonicalizeWinePaths(Set<String> rawPaths) {
+        return rawPaths.stream()
+                .map(MilleniaScrapingServiceTest::canonicalizeWinePath)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+    }
+
+    private static String canonicalizeWinePath(String path) {
+        Matcher matcher = CANONICAL_WINE_PATH_RE.matcher(path.toLowerCase());
+        if (!matcher.matches()) {
+            return path;
+        }
+        return "/" + matcher.group(1) + ".html";
+    }
+
+    private static Integer extractVintageFromPath(String path) {
+        Matcher matcher = VINTAGE_FROM_PATH_RE.matcher(path.toLowerCase());
+        if (!matcher.find()) {
+            throw new IllegalArgumentException("No millesime in path: " + path);
+        }
+        return Integer.valueOf(matcher.group(1));
+    }
+
+    private static Integer extractVintageFromUrl(String url) {
+        return extractVintageFromPath(URI.create(url).getPath());
     }
 
     private record ListingPageWines(int entriesCount, Set<String> uniqueWinePaths) {}
