@@ -74,7 +74,7 @@ public final class MilleniumWineRatingsScraper {
     public static List<WineRating> scrape(String startUrl, int maxPages, double minDelay, double maxDelay,
                                           int timeoutSeconds, String userAgent) throws InterruptedException {
         CliArgs cli = new CliArgs(startUrl, maxPages, minDelay, maxDelay, timeoutSeconds,
-                Path.of("wine_ratings.csv"), Path.of("wine_ratings.json"), userAgent);
+                "wine_ratings.csv", "wine_ratings.json", userAgent);
         return crawlAndExtract(cli);
     }
 
@@ -352,7 +352,7 @@ public final class MilleniumWineRatingsScraper {
                 if (i < ratings.size() - 1) {
                     sb.append(',');
                 }
-                sb.append('\\n');
+                sb.append('\n');
             }
             sb.append("]\\n");
             out.write(sb.toString().getBytes(StandardCharsets.UTF_8));
