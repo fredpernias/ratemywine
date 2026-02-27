@@ -28,7 +28,7 @@ import java.util.regex.Pattern;
 
 public final class MilleniumWineRatingsScraper {
     private static final Pattern RATING_WITH_SCALE_RE = Pattern.compile(
-            "(?:(?:note|notation|rating|score)\\s*[:\\-]?\\s*)?(\\d{1,2}(?:[\\.,]\\d)?)\\s*(?:/\\s*(20|100)|sur\\s*(20|100))",
+            "(?:(?:note|notation|rating|score)\\s*[:\\-]?\\s*)?(\\d{1,3}(?:[\\.,]\\d)?)\\s*(?:/\\s*(20|100)|sur\\s*(20|100))",
             Pattern.CASE_INSENSITIVE);
     private static final Pattern TITLE_RE = Pattern.compile("<title[^>]*>(.*?)</title>", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
     private static final Pattern H1_RE = Pattern.compile("<h1[^>]*>(.*?)</h1>", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
@@ -37,9 +37,37 @@ public final class MilleniumWineRatingsScraper {
             Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
     private static final Pattern TAG_RE = Pattern.compile("<[^>]+>");
     private static final Pattern HREF_RE = Pattern.compile("<a[^>]*href=[\"']([^\"'#]+)[\"'][^>]*>", Pattern.CASE_INSENSITIVE);
-    private static final Pattern JSON_RATING_VALUE_RE = Pattern.compile("\"ratingValue\"\\s*:\\s*\"?([0-9]+(?:[.,][0-9]+)?)\"?");
-    private static final Pattern JSON_BEST_RATING_RE = Pattern.compile("\"bestRating\"\\s*:\\s*\"?([0-9]+)\"?");
-    private static final Pattern JSON_NAME_RE = Pattern.compile("\"name\"\\s*:\\s*\"([^\"]+)\"");
+    private static final Pattern JSON_RATING_VALUE_RE = Pattern.compile("\\\"ratingValue\\\"\\s*:\\s*\\\"?([0-9]+(?:[.,][0-9]+)?)\\\"?");
+    private static final Pattern JSON_BEST_RATING_RE = Pattern.compile("\\\"bestRating\\\"\\s*:\\s*\\\"?([0-9]+)\\\"?");
+    private static final Pattern JSON_NAME_RE = Pattern.compile("\\\"name\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
+
+    private static final List<SourcePattern> SOURCE_PATTERNS = List.of(
+            source("wine_advocate", "The Wine Advocate / Parker", "critic", "100", "(?:wine\\s+advocate|robert\\s+parker|parker)", null),
+            source("wine_spectator", "Wine Spectator", "critic", "100", "wine\\s+spectator", null),
+            source("decanter", "Decanter", "critic", "100", "\\bdecanter\\b", null),
+            source("wine_enthusiast", "Wine Enthusiast", "critic", "100", "wine\\s+enthusiast", null),
+            source("vinous", "Vinous", "critic", "100", "\\bvinous\\b|antonio\\s+galloni", null),
+            source("james_suckling", "James Suckling", "critic", "100", "james\\s*suckling", null),
+            source("jancis_robinson", "Jancis Robinson", "critic", "20", "jancis\\s+robinson", null),
+            source("falstaff", "Falstaff", "critic", "100", "\\bfalstaff\\b", null),
+            source("guide_hachette", "Guide Hachette", "critic", null, "guide\\s+hachette|hachette", "(?:\\*{1,3}|coup\\s+de\\s+coeur)"),
+            source("rvf", "RVF / Guide des Meilleurs Vins", "critic", "100", "revue\\s+du\\s+vin\\s+de\\s+france|\\brvf\\b|guide\\s+des\\s+meilleurs\\s+vins", null),
+            source("bettane_desseauve", "Bettane+Desseauve", "critic", "100", "bettane\\s*\\+?\\s*desseauve", null),
+            source("gilbert_gaillard", "Gilbert & Gaillard", "critic", "100", "gilbert\\s*&\\s*gaillard", "(?:gold|or|silver|argent|medal|m[ée]daille)"),
+            source("gambero_rosso", "Gambero Rosso", "guide", null, "gambero\\s+rosso", "tre\\s+bicchieri|due\\s+bicchieri|bicchieri"),
+            source("slow_wine", "Slow Wine", "guide", null, "slow\\s+wine", "escargot|great\\s+wine"),
+            source("guia_penin", "Guía Peñín", "guide", "100", "gu[ií]a\\s+pe[nñ][ií]n|pe[nñ][ií]n", null),
+            source("dwwe", "Decanter World Wine Awards", "competition", null, "decanter\\s+world\\s+wine\\s+awards|\\bdwwa\\b", "platinum|gold|silver|bronze|best\\s+in\\s+show"),
+            source("iwc", "International Wine Challenge", "competition", null, "international\\s+wine\\s+challenge|\\biwc\\b", "gold|silver|bronze|commended"),
+            source("iwsc", "International Wine & Spirit Competition", "competition", null, "international\\s+wine\\s*&\\s*spirit\\s+competition|\\biwsc\\b", "gold|silver|bronze"),
+            source("cmb", "Concours Mondial de Bruxelles", "competition", null, "concours\\s+mondial\\s+de\\s+bruxelles|\\bcmb\\b", "grand\\s+gold|gold|silver|argent"),
+            source("mundus_vini", "Mundus Vini", "competition", null, "mundus\\s+vini", "grand\\s+gold|gold|silver"),
+            source("berliner_wine_trophy", "Berliner Wine Trophy", "competition", null, "berliner\\s+wine\\s+trophy", "gold|silver"),
+            source("concours_general_agricole", "Concours Général Agricole", "competition", null, "concours\\s+g[ée]n[ée]ral\\s+agricole", "or|argent|bronze|gold|silver"),
+            source("vinalies_internationales", "Vinalies Internationales", "competition", null, "vinalies\\s+internationales", "grand\\s+gold|gold|silver|argent"),
+            source("challenge_international_du_vin", "Challenge International du Vin", "competition", null, "challenge\\s+international\\s+du\\s+vin", "gold|silver|bronze|or|argent"),
+            source("michelin_grapes", "MICHELIN Grapes", "upcoming", null, "michelin\\s+grapes", "1\\s*grape|2\\s*grapes|3\\s*grapes|selected")
+    );
 
     private MilleniumWineRatingsScraper() {}
 
@@ -53,7 +81,7 @@ public final class MilleniumWineRatingsScraper {
         List<WineRating> ratings = crawlAndExtract(cli);
         writeOutputs(ratings, Path.of(cli.csvPath), Path.of(cli.jsonPath));
 
-        System.out.println("Terminé. " + ratings.size() + " notes extraites.");
+        System.out.println("Terminé. " + ratings.size() + " note(s) extraite(s).");
         System.out.println("CSV : " + cli.csvPath);
         System.out.println("JSON: " + cli.jsonPath);
     }
@@ -83,10 +111,14 @@ public final class MilleniumWineRatingsScraper {
             }
 
             String title = findTitle(html);
-            List<WineRating> pageRatings = extractRatingsFromJsonLd(html, url, title);
+            String text = stripTags(html);
+            List<WineRating> pageRatings = new ArrayList<>();
+            pageRatings.addAll(extractRatingsFromJsonLd(html, url, title));
+            pageRatings.addAll(extractRatingsBySource(text, url, title));
             if (pageRatings.isEmpty()) {
-                pageRatings = extractRatingsFromText(html, url, title);
+                pageRatings = extractRatingsFromText(text, url, title);
             }
+
             if (!pageRatings.isEmpty()) {
                 ratings.addAll(pageRatings);
                 System.err.println("  -> " + pageRatings.size() + " note(s) détectée(s)");
@@ -102,6 +134,75 @@ public final class MilleniumWineRatingsScraper {
             Thread.sleep((long) (delay * 1000));
         }
         return ratings;
+    }
+
+    private static List<WineRating> extractRatingsBySource(String text, String url, String title) {
+        List<WineRating> found = new ArrayList<>();
+        Set<String> dedupe = new HashSet<>();
+        for (SourcePattern source : SOURCE_PATTERNS) {
+            Matcher sourceMatcher = source.matcher.matcher(text);
+            while (sourceMatcher.find()) {
+                String window = extractWindow(text, sourceMatcher.start(), sourceMatcher.end(), 180);
+                RatingScore score = findScore(window, source.defaultScale);
+                String distinction = findDistinction(window, source.distinctionPattern);
+
+                if (score == null && (distinction == null || distinction.isBlank())) {
+                    continue;
+                }
+
+                String ratingValue = score == null ? "" : score.value();
+                String ratingScale = score == null ? "" : score.scale();
+                String key = source.key + "|" + ratingValue + "|" + ratingScale + "|" + Objects.toString(distinction, "");
+                if (dedupe.add(key)) {
+                    found.add(new WineRating(url, title, source.key, source.label, source.type,
+                            ratingValue, ratingScale, Objects.toString(distinction, ""), "source-pattern"));
+                }
+            }
+        }
+        return found;
+    }
+
+    private static RatingScore findScore(String text, String defaultScale) {
+        Matcher withScale = RATING_WITH_SCALE_RE.matcher(text);
+        if (withScale.find()) {
+            String value = withScale.group(1).replace(',', '.');
+            String scale = Objects.toString(withScale.group(2), Objects.toString(withScale.group(3), defaultScale));
+            return new RatingScore(value, scale == null ? "" : scale);
+        }
+
+        Matcher outOf100 = Pattern.compile("\\b(\\d{2,3}(?:[\\.,]\\d+)?)\\b").matcher(text);
+        while (outOf100.find()) {
+            String value = outOf100.group(1).replace(',', '.');
+            try {
+                double parsed = Double.parseDouble(value);
+                if (parsed >= 50 && parsed <= 100) {
+                    return new RatingScore(value, defaultScale == null ? "100" : defaultScale);
+                }
+                if (parsed >= 10 && parsed <= 20 && "20".equals(defaultScale)) {
+                    return new RatingScore(value, "20");
+                }
+            } catch (NumberFormatException ignored) {
+                // ignore parse issue
+            }
+        }
+        return null;
+    }
+
+    private static String findDistinction(String text, Pattern distinctionPattern) {
+        if (distinctionPattern == null) {
+            return "";
+        }
+        Matcher matcher = distinctionPattern.matcher(text);
+        if (matcher.find()) {
+            return matcher.group().trim();
+        }
+        return "";
+    }
+
+    private static String extractWindow(String text, int start, int end, int radius) {
+        int from = Math.max(0, start - radius);
+        int to = Math.min(text.length(), end + radius);
+        return text.substring(from, to);
     }
 
     private static String fetchHtml(String url, String userAgent, int timeoutSeconds) throws IOException, InterruptedException {
@@ -146,27 +247,28 @@ public final class MilleniumWineRatingsScraper {
             String ratingValue = val.group(1).replace(',', '.');
 
             Matcher best = JSON_BEST_RATING_RE.matcher(scriptBody);
-            String bestRating = best.find() ? best.group(1) : "?";
+            String bestRating = best.find() ? best.group(1) : "";
 
             Matcher name = JSON_NAME_RE.matcher(scriptBody);
             String wineName = name.find() ? name.group(1) : title;
 
-            results.add(new WineRating(url, wineName, ratingValue, bestRating, "json-ld"));
+            results.add(new WineRating(url, wineName, "generic_jsonld", "JSON-LD aggregate", "generic",
+                    ratingValue, bestRating, "", "json-ld"));
         }
         return results;
     }
 
-    private static List<WineRating> extractRatingsFromText(String html, String url, String title) {
-        String text = stripTags(html);
+    private static List<WineRating> extractRatingsFromText(String text, String url, String title) {
         List<WineRating> found = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         Matcher m = RATING_WITH_SCALE_RE.matcher(text);
         while (m.find()) {
             String value = m.group(1).replace(',', '.');
-            String scale = Objects.toString(m.group(2), Objects.toString(m.group(3), "?"));
+            String scale = Objects.toString(m.group(2), Objects.toString(m.group(3), ""));
             String key = value + ":" + scale;
             if (seen.add(key)) {
-                found.add(new WineRating(url, title, value, scale, "regex-text"));
+                found.add(new WineRating(url, title, "generic_regex", "Regex text score", "generic",
+                        value, scale, "", "regex-text"));
             }
         }
         return found;
@@ -213,31 +315,39 @@ public final class MilleniumWineRatingsScraper {
 
     private static void writeOutputs(List<WineRating> ratings, Path csvPath, Path jsonPath) throws IOException {
         try (BufferedWriter writer = Files.newBufferedWriter(csvPath, StandardCharsets.UTF_8)) {
-            writer.write("url,wine_name,rating_value,rating_scale,source\n");
+            writer.write("url,wine_name,source_key,source_name,source_type,rating_value,rating_scale,distinction,extraction_source\\n");
             for (WineRating row : ratings) {
                 writer.write(csvEscape(row.url) + ","
                         + csvEscape(row.wineName) + ","
+                        + csvEscape(row.sourceKey) + ","
+                        + csvEscape(row.sourceName) + ","
+                        + csvEscape(row.sourceType) + ","
                         + csvEscape(row.ratingValue) + ","
                         + csvEscape(row.ratingScale) + ","
-                        + csvEscape(row.source) + "\n");
+                        + csvEscape(row.distinction) + ","
+                        + csvEscape(row.extractionSource) + "\\n");
             }
         }
 
         try (OutputStream out = Files.newOutputStream(jsonPath)) {
-            StringBuilder sb = new StringBuilder("[\n");
+            StringBuilder sb = new StringBuilder("[\\n");
             for (int i = 0; i < ratings.size(); i++) {
                 WineRating r = ratings.get(i);
-                sb.append("  {\"url\":\"").append(jsonEscape(r.url))
-                        .append("\",\"wine_name\":\"").append(jsonEscape(r.wineName))
-                        .append("\",\"rating_value\":\"").append(jsonEscape(r.ratingValue))
-                        .append("\",\"rating_scale\":\"").append(jsonEscape(r.ratingScale))
-                        .append("\",\"source\":\"").append(jsonEscape(r.source)).append("\"}");
+                sb.append("  {\\\"url\\\":\\\"").append(jsonEscape(r.url))
+                        .append("\\\",\\\"wine_name\\\":\\\"").append(jsonEscape(r.wineName))
+                        .append("\\\",\\\"source_key\\\":\\\"").append(jsonEscape(r.sourceKey))
+                        .append("\\\",\\\"source_name\\\":\\\"").append(jsonEscape(r.sourceName))
+                        .append("\\\",\\\"source_type\\\":\\\"").append(jsonEscape(r.sourceType))
+                        .append("\\\",\\\"rating_value\\\":\\\"").append(jsonEscape(r.ratingValue))
+                        .append("\\\",\\\"rating_scale\\\":\\\"").append(jsonEscape(r.ratingScale))
+                        .append("\\\",\\\"distinction\\\":\\\"").append(jsonEscape(r.distinction))
+                        .append("\\\",\\\"extraction_source\\\":\\\"").append(jsonEscape(r.extractionSource)).append("\\\"}");
                 if (i < ratings.size() - 1) {
                     sb.append(',');
                 }
-                sb.append('\n');
+                sb.append('\\n');
             }
-            sb.append("]\n");
+            sb.append("]\\n");
             out.write(sb.toString().getBytes(StandardCharsets.UTF_8));
         }
     }
@@ -257,7 +367,29 @@ public final class MilleniumWineRatingsScraper {
         return s.endsWith("/") ? s.substring(0, s.length() - 1) : s;
     }
 
-    private record WineRating(String url, String wineName, String ratingValue, String ratingScale, String source) {}
+    private record WineRating(
+            String url,
+            String wineName,
+            String sourceKey,
+            String sourceName,
+            String sourceType,
+            String ratingValue,
+            String ratingScale,
+            String distinction,
+            String extractionSource
+    ) {}
+
+    private record RatingScore(String value, String scale) {}
+
+    private record SourcePattern(String key, String label, String type, String defaultScale,
+                                 Pattern matcher, Pattern distinctionPattern) {}
+
+    private static SourcePattern source(String key, String label, String type, String defaultScale,
+                                        String sourceRegex, String distinctionRegex) {
+        Pattern matcher = Pattern.compile(sourceRegex, Pattern.CASE_INSENSITIVE);
+        Pattern distinction = distinctionRegex == null ? null : Pattern.compile(distinctionRegex, Pattern.CASE_INSENSITIVE);
+        return new SourcePattern(key, label, type, defaultScale, matcher, distinction);
+    }
 
     private static final class CliArgs {
         private final String startUrl;

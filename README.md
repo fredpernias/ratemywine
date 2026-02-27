@@ -27,7 +27,10 @@ spring.datasource.password=${DB_PASSWORD}
 spring.datasource.driver-class-name=org.postgresql.Driver
 ```
 
-L'entité JPA `Wine` est mappée sur la table `wines`.
+Les entités JPA sont mappées sur :
+
+- `wines` (historique),
+- `millenia` (nouvelles notes extraites depuis le scraper Millenium avec source, score, distinction et type de guide/concours).
 
 ## Build
 
@@ -83,3 +86,13 @@ Options :
 - `--csv wine_ratings.csv`
 - `--json wine_ratings.json`
 - `--user-agent "Mozilla/5.0 (compatible; WineRatingsBot/1.0)"`
+
+
+Le scraper `MilleniumWineRatingsScraper` exporte désormais des colonnes détaillées par source:
+
+- `source_key`, `source_name`, `source_type`
+- `rating_value`, `rating_scale`
+- `distinction` (médailles/mentions: Tre Bicchieri, Gold, Coup de coeur, etc.)
+- `extraction_source`
+
+Sources couvertes: Wine Advocate/Parker, Wine Spectator, Decanter, Wine Enthusiast, Vinous, James Suckling, Jancis Robinson, Falstaff, Hachette, RVF, Bettane+Desseauve, Gilbert & Gaillard, Gambero Rosso, Slow Wine, Guia Peñín, DWWA, IWC, IWSC, CMB, Mundus Vini, Berliner Wine Trophy, Concours Général Agricole, Vinalies Internationales, Challenge International du Vin, MICHELIN Grapes (si présent dans les pages crawlées).
