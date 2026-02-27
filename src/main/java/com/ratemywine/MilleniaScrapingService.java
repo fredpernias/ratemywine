@@ -21,6 +21,8 @@ public class MilleniaScrapingService {
     private static final String DEFAULT_USER_AGENT =
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
                     "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
+    private static final double DEFAULT_MIN_DELAY_SECONDS = 0.5;
+    private static final double DEFAULT_MAX_DELAY_SECONDS = 2.0;
     private static final Pattern YEAR_RE = Pattern.compile("(?:19|20)\\d{2}");
     private static final String AGGREGATE_SOURCE_KEY = "aggregated_ratings";
     private static final String AGGREGATE_SOURCE_NAME = "Aggregated ratings";
@@ -53,7 +55,7 @@ public class MilleniaScrapingService {
     @Transactional
     public int scrapeAndSync(String startUrl, int maxPages) throws InterruptedException {
         List<MilleniumWineRatingsScraper.WineRating> rawRatings = MilleniumWineRatingsScraper
-                .scrape(startUrl, maxPages, 0, 0, 20, DEFAULT_USER_AGENT);
+                .scrape(startUrl, maxPages, DEFAULT_MIN_DELAY_SECONDS, DEFAULT_MAX_DELAY_SECONDS, 20, DEFAULT_USER_AGENT);
         Map<String, List<MilleniumWineRatingsScraper.WineRating>> ratingsByUrl = new LinkedHashMap<>();
         for (MilleniumWineRatingsScraper.WineRating rating : rawRatings) {
             if (rating.url() == null || rating.url().isBlank()) {

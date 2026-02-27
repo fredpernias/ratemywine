@@ -1,8 +1,11 @@
-package com.ratemywine;
+﻿package com.ratemywine;
 
 import java.io.BufferedWriter;
 import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
 import java.io.OutputStream;
+import java.io.Serializable;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.http.HttpClient;
@@ -23,6 +26,7 @@ import java.util.Objects;
 import java.util.Queue;
 import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.net.ssl.SSLContext;
@@ -106,7 +110,7 @@ public final class MilleniumWineRatingsScraper {
     public static List<WineRating> scrape(String startUrl, int maxPages, double minDelay, double maxDelay,
                                           int timeoutSeconds, String userAgent) throws InterruptedException {
         CliArgs cli = new CliArgs(startUrl, maxPages, minDelay, maxDelay, timeoutSeconds,
-                "wine_ratings.csv", "wine_ratings.json", userAgent);
+                "wine_ratings.csv", "wine_ratings.json", userAgent, "target/millesima-crawl.state.bin");
         return crawlAndExtract(cli);
     }
 
@@ -128,60 +132,223 @@ public final class MilleniumWineRatingsScraper {
     private static List<WineRating> crawlAndExtract(CliArgs cli) throws InterruptedException {
         URI start = URI.create(cli.startUrl);
         String domain = start.getHost();
-        Queue<String> queue = new ArrayDeque<>();
         String normalizedStartUrl = normalizeUrl(cli.startUrl, cli.startUrl);
-        queue.add(normalizedStartUrl == null ? trimTrailingSlash(cli.startUrl) : normalizedStartUrl);
-        Set<String> seenUrls = new HashSet<>();
-        List<WineRating> ratings = new ArrayList<>();
+        String startUrl = normalizedStartUrl == null ? trimTrailingSlash(cli.startUrl) : normalizedStartUrl;
+        Path statePath = Path.of(cli.statePath);
+        CrawlState state = loadOrCreateState(statePath, startUrl, domain, cli.maxPages, isLikelyListingPath(start.getPath()));
+        AtomicBoolean completed = new AtomicBoolean(false);
+        Thread shutdownHook = new Thread(() -> {
+            if (!completed.get()) {
+                saveState(statePath, state);
+                System.err.println("Etat du crawl sauvegarde dans " + statePath);
+            }
+        });
+        Runtime.getRuntime().addShutdownHook(shutdownHook);
+        try {
+            if (state.mode == CrawlMode.LISTING_START) {
+                crawlFromListingStart(cli, domain, state, statePath);
+            } else {
+                crawlWithGlobalPageCap(cli, domain, state, statePath);
+            }
+            completed.set(true);
+            deleteStateFile(statePath);
+            return List.copyOf(state.ratings);
+        } finally {
+            try {
+                Runtime.getRuntime().removeShutdownHook(shutdownHook);
+            } catch (IllegalStateException ignored) {
+                // JVM is already shutting down.
+            }
+        }
+    }
+
+    private static void crawlWithGlobalPageCap(CliArgs cli, String domain, CrawlState state, Path statePath)
+            throws InterruptedException {
         Random random = new Random();
 
-        while (!queue.isEmpty() && seenUrls.size() < cli.maxPages) {
-            String url = queue.poll();
-            if (!seenUrls.add(url)) {
+        while (!state.globalQueue.isEmpty() && state.seenGlobalUrls.size() < state.maxPages) {
+            String url = state.globalQueue.poll();
+            state.queuedGlobalUrls.remove(url);
+            if (!state.seenGlobalUrls.add(url)) {
                 continue;
             }
 
-            System.err.printf("[%d/%d] Visite: %s%n", seenUrls.size(), cli.maxPages, url);
-            String html;
-            try {
-                html = fetchHtml(url, cli.userAgent, cli.timeoutSeconds);
-            } catch (Exception e) {
-                System.err.println("  -> Erreur HTTP: " + e.getMessage());
+            System.err.printf("[%d/%d] Visite: %s%n", state.seenGlobalUrls.size(), state.maxPages, url);
+            String html = fetchHtmlWithRandomDelay(url, cli, random);
+            if (html == null) {
+                saveState(statePath, state);
                 continue;
             }
 
-            List<WineRating> pageRatings = new ArrayList<>();
-            if (!isLikelyListingPage(url, html)) {
-                String title = findTitle(html);
-                String text = stripTags(html);
-                List<WineRating> criticSlideRatings = extractRatingsFromCriticSlides(html, url, title);
-                if (!criticSlideRatings.isEmpty()) {
-                    pageRatings.addAll(criticSlideRatings);
-                } else {
-                    pageRatings.addAll(extractRatingsFromJsonLd(html, url, title));
-                    pageRatings.addAll(extractRatingsBySource(text, url, title));
-                    if (pageRatings.isEmpty()) {
-                        pageRatings = extractRatingsFromText(text, url, title);
-                    }
-                }
-                pageRatings = dedupeRatings(pageRatings);
-            }
-
+            List<WineRating> pageRatings = extractRatingsFromWinePage(html, url);
             if (!pageRatings.isEmpty()) {
-                ratings.addAll(pageRatings);
-                System.err.println("  -> " + pageRatings.size() + " note(s) détectée(s)");
+                state.ratings.addAll(pageRatings);
+                System.err.println("  -> " + pageRatings.size() + " note(s) detectee(s)");
             }
 
             for (String link : extractInternalLinks(html, url, domain)) {
-                if (!seenUrls.contains(link) && !queue.contains(link)) {
-                    queue.add(link);
+                if (!state.seenGlobalUrls.contains(link) && state.queuedGlobalUrls.add(link)) {
+                    state.globalQueue.add(link);
                 }
             }
+            saveState(statePath, state);
+        }
+    }
 
+    private static void crawlFromListingStart(CliArgs cli, String domain, CrawlState state, Path statePath)
+            throws InterruptedException {
+        Random random = new Random();
+
+        while (!state.listingQueue.isEmpty() && state.seenListingUrls.size() < state.maxPages) {
+            String listingUrl = state.listingQueue.poll();
+            state.queuedListingUrls.remove(listingUrl);
+            if (!state.seenListingUrls.add(listingUrl)) {
+                continue;
+            }
+
+            System.err.printf("[listing %d/%d] Visite: %s%n", state.seenListingUrls.size(), state.maxPages, listingUrl);
+            String listingHtml = fetchHtmlWithRandomDelay(listingUrl, cli, random);
+            if (listingHtml == null) {
+                saveState(statePath, state);
+                continue;
+            }
+
+            for (String link : extractInternalLinks(listingHtml, listingUrl, domain)) {
+                URI linkUri = URI.create(link);
+                if (isLikelyListingPath(linkUri.getPath())) {
+                    if (!state.seenListingUrls.contains(link) && state.queuedListingUrls.add(link)) {
+                        state.listingQueue.add(link);
+                    }
+                    continue;
+                }
+                if (isLikelyWineDetailPath(linkUri.getPath()) && state.queuedWineUrls.add(link)) {
+                    state.wineQueue.add(link);
+                }
+            }
+            saveState(statePath, state);
+        }
+
+        while (!state.wineQueue.isEmpty()) {
+            String wineUrl = state.wineQueue.poll();
+            state.queuedWineUrls.remove(wineUrl);
+            if (!state.seenWineUrls.add(wineUrl)) {
+                continue;
+            }
+
+            System.err.printf("[wine %d] Visite: %s%n", state.seenWineUrls.size(), wineUrl);
+            String wineHtml = fetchHtmlWithRandomDelay(wineUrl, cli, random);
+            if (wineHtml == null) {
+                saveState(statePath, state);
+                continue;
+            }
+
+            List<WineRating> pageRatings = extractRatingsFromWinePage(wineHtml, wineUrl);
+            if (!pageRatings.isEmpty()) {
+                state.ratings.addAll(pageRatings);
+                System.err.println("  -> " + pageRatings.size() + " note(s) detectee(s)");
+            }
+
+            for (String vintageUrl : extractWineVintageLinks(wineHtml, wineUrl, domain)) {
+                if (!state.seenWineUrls.contains(vintageUrl) && state.queuedWineUrls.add(vintageUrl)) {
+                    state.wineQueue.add(vintageUrl);
+                }
+            }
+            saveState(statePath, state);
+        }
+    }
+
+    private static String fetchHtmlWithRandomDelay(String url, CliArgs cli, Random random) throws InterruptedException {
+        if (cli.maxDelay > 0 || cli.minDelay > 0) {
             double delay = cli.minDelay + random.nextDouble() * (cli.maxDelay - cli.minDelay);
             Thread.sleep((long) (delay * 1000));
         }
-        return ratings;
+        try {
+            return fetchHtml(url, cli.userAgent, cli.timeoutSeconds);
+        } catch (Exception e) {
+            System.err.println("  -> Erreur HTTP: " + e.getMessage());
+            return null;
+        }
+    }
+
+    private static List<WineRating> extractRatingsFromWinePage(String html, String pageUrl) {
+        if (isLikelyListingPage(pageUrl, html)) {
+            return List.of();
+        }
+        String title = findTitle(html);
+        String text = stripTags(html);
+        List<WineRating> pageRatings = new ArrayList<>();
+        List<WineRating> criticSlideRatings = extractRatingsFromCriticSlides(html, pageUrl, title);
+        if (!criticSlideRatings.isEmpty()) {
+            pageRatings.addAll(criticSlideRatings);
+        } else {
+            pageRatings.addAll(extractRatingsFromJsonLd(html, pageUrl, title));
+            pageRatings.addAll(extractRatingsBySource(text, pageUrl, title));
+            if (pageRatings.isEmpty()) {
+                pageRatings = extractRatingsFromText(text, pageUrl, title);
+            }
+        }
+        return dedupeRatings(pageRatings);
+    }
+
+    private static CrawlState loadOrCreateState(Path statePath, String startUrl, String domain, int maxPages, boolean listingStart) {
+        if (Files.exists(statePath)) {
+            CrawlState loaded = loadState(statePath);
+            if (loaded != null && loaded.isCompatible(startUrl, domain, maxPages)) {
+                System.err.println("Reprise du crawl depuis l'etat: " + statePath);
+                return loaded;
+            }
+            System.err.println("Etat existant incompatible, nouveau crawl initialise.");
+        }
+
+        CrawlState state = new CrawlState();
+        state.startUrl = startUrl;
+        state.domain = domain;
+        state.maxPages = maxPages;
+        state.mode = listingStart ? CrawlMode.LISTING_START : CrawlMode.GLOBAL;
+        if (listingStart) {
+            state.listingQueue.add(startUrl);
+            state.queuedListingUrls.add(startUrl);
+        } else {
+            state.globalQueue.add(startUrl);
+            state.queuedGlobalUrls.add(startUrl);
+        }
+        saveState(statePath, state);
+        return state;
+    }
+
+    private static CrawlState loadState(Path statePath) {
+        try (ObjectInputStream in = new ObjectInputStream(Files.newInputStream(statePath))) {
+            Object loaded = in.readObject();
+            if (loaded instanceof CrawlState state) {
+                return state;
+            }
+            return null;
+        } catch (IOException | ClassNotFoundException e) {
+            System.err.println("Impossible de relire l'etat de crawl: " + e.getMessage());
+            return null;
+        }
+    }
+
+    private static void saveState(Path statePath, CrawlState state) {
+        try {
+            Path parent = statePath.getParent();
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
+            try (ObjectOutputStream out = new ObjectOutputStream(Files.newOutputStream(statePath))) {
+                out.writeObject(state);
+            }
+        } catch (IOException e) {
+            System.err.println("Impossible de sauvegarder l'etat de crawl: " + e.getMessage());
+        }
+    }
+
+    private static void deleteStateFile(Path statePath) {
+        try {
+            Files.deleteIfExists(statePath);
+        } catch (IOException e) {
+            System.err.println("Impossible de supprimer l'etat de crawl: " + e.getMessage());
+        }
     }
 
     private static List<WineRating> extractRatingsBySource(String text, String url, String title) {
@@ -805,7 +972,9 @@ public final class MilleniumWineRatingsScraper {
             String ratingScale,
             String distinction,
             String extractionSource
-    ) {}
+    ) implements Serializable {
+        private static final long serialVersionUID = 1L;
+    }
 
     private record RatingScore(String value, String scale) {}
 
@@ -819,6 +988,40 @@ public final class MilleniumWineRatingsScraper {
         return new SourcePattern(key, label, type, defaultScale, matcher, distinction);
     }
 
+    private enum CrawlMode {
+        LISTING_START,
+        GLOBAL
+    }
+
+    private static final class CrawlState implements Serializable {
+        private static final long serialVersionUID = 1L;
+
+        private CrawlMode mode;
+        private String startUrl;
+        private String domain;
+        private int maxPages;
+
+        private final Queue<String> globalQueue = new ArrayDeque<>();
+        private final Set<String> seenGlobalUrls = new HashSet<>();
+        private final Set<String> queuedGlobalUrls = new HashSet<>();
+
+        private final Queue<String> listingQueue = new ArrayDeque<>();
+        private final Set<String> seenListingUrls = new HashSet<>();
+        private final Set<String> queuedListingUrls = new HashSet<>();
+
+        private final Queue<String> wineQueue = new ArrayDeque<>();
+        private final Set<String> seenWineUrls = new HashSet<>();
+        private final Set<String> queuedWineUrls = new HashSet<>();
+
+        private final List<WineRating> ratings = new ArrayList<>();
+
+        private boolean isCompatible(String expectedStartUrl, String expectedDomain, int expectedMaxPages) {
+            return Objects.equals(startUrl, expectedStartUrl)
+                    && Objects.equals(domain, expectedDomain)
+                    && maxPages == expectedMaxPages;
+        }
+    }
+
     private static final class CliArgs {
         private final String startUrl;
         private final int maxPages;
@@ -828,9 +1031,10 @@ public final class MilleniumWineRatingsScraper {
         private final String csvPath;
         private final String jsonPath;
         private final String userAgent;
+        private final String statePath;
 
         private CliArgs(String startUrl, int maxPages, double minDelay, double maxDelay, int timeoutSeconds,
-                        String csvPath, String jsonPath, String userAgent) {
+                        String csvPath, String jsonPath, String userAgent, String statePath) {
             this.startUrl = startUrl;
             this.maxPages = maxPages;
             this.minDelay = minDelay;
@@ -839,6 +1043,7 @@ public final class MilleniumWineRatingsScraper {
             this.csvPath = csvPath;
             this.jsonPath = jsonPath;
             this.userAgent = userAgent;
+            this.statePath = statePath;
         }
 
         private static CliArgs parse(String[] args) {
@@ -849,12 +1054,13 @@ public final class MilleniumWineRatingsScraper {
             return new CliArgs(
                     startUrl,
                     Integer.parseInt(options.getOrDefault("--max-pages", "200")),
-                    Double.parseDouble(options.getOrDefault("--min-delay", "1.0")),
+                    Double.parseDouble(options.getOrDefault("--min-delay", "0.5")),
                     Double.parseDouble(options.getOrDefault("--max-delay", "2.0")),
                     Integer.parseInt(options.getOrDefault("--timeout", "20")),
                     options.getOrDefault("--csv", "wine_ratings.csv"),
                     options.getOrDefault("--json", "wine_ratings.json"),
-                    options.getOrDefault("--user-agent", "Mozilla/5.0 (compatible; WineRatingsBot/1.0)")
+                    options.getOrDefault("--user-agent", "Mozilla/5.0 (compatible; WineRatingsBot/1.0)"),
+                    options.getOrDefault("--state-file", "target/millesima-crawl.state.bin")
             );
         }
     }
@@ -876,3 +1082,5 @@ public final class MilleniumWineRatingsScraper {
         }
     }
 }
+
+
