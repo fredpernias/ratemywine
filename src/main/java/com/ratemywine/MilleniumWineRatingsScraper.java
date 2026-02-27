@@ -25,9 +25,14 @@ import java.util.Random;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLParameters;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 
 public final class MilleniumWineRatingsScraper {
     public static final String DEFAULT_MILLESIMA_START_URL = "https://www.millesima.fr/tous-nos-vins.html";
+    public static final String INSECURE_SSL_PROPERTY = "ratemywine.scraper.insecure-ssl";
 
     private static final Pattern RATING_WITH_SCALE_RE = Pattern.compile(
             "(?:(?:note|notation|rating|score)\\s*[:\\-]?\\s*)?(\\d{1,3}(?:[\\.,]\\d)?\\+?)\\s*(?:/\\s*(20|100)|sur\\s*(20|100))",
@@ -239,8 +244,7 @@ public final class MilleniumWineRatingsScraper {
     }
 
     private static String fetchHtml(String url, String userAgent, int timeoutSeconds) throws IOException, InterruptedException {
-        HttpClient client = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NORMAL)
-                .connectTimeout(Duration.ofSeconds(timeoutSeconds)).build();
+        HttpClient client = newHttpClient(timeoutSeconds);
         HttpRequest request = HttpRequest.newBuilder(URI.create(url))
                 .header("User-Agent", userAgent)
                 .timeout(Duration.ofSeconds(timeoutSeconds))
@@ -248,6 +252,54 @@ public final class MilleniumWineRatingsScraper {
                 .build();
         HttpResponse<byte[]> response = client.send(request, HttpResponse.BodyHandlers.ofByteArray());
         return new String(response.body(), StandardCharsets.UTF_8);
+    }
+
+    private static HttpClient newHttpClient(int timeoutSeconds) {
+        HttpClient.Builder builder = HttpClient.newBuilder()
+                .followRedirects(HttpClient.Redirect.NORMAL)
+                .connectTimeout(Duration.ofSeconds(timeoutSeconds));
+        if (isInsecureSslEnabled()) {
+            builder.sslContext(buildInsecureSslContext());
+            SSLParameters sslParameters = new SSLParameters();
+            sslParameters.setEndpointIdentificationAlgorithm(null);
+            builder.sslParameters(sslParameters);
+        }
+        return builder.build();
+    }
+
+    private static boolean isInsecureSslEnabled() {
+        if (Boolean.parseBoolean(System.getProperty(INSECURE_SSL_PROPERTY, "false"))) {
+            return true;
+        }
+        return Boolean.parseBoolean(System.getenv("RATEMYWINE_SCRAPER_INSECURE_SSL"));
+    }
+
+    private static SSLContext buildInsecureSslContext() {
+        try {
+            TrustManager[] trustAllCerts = new TrustManager[] {
+                    new X509TrustManager() {
+                        @Override
+                        public java.security.cert.X509Certificate[] getAcceptedIssuers() {
+                            return new java.security.cert.X509Certificate[0];
+                        }
+
+                        @Override
+                        public void checkClientTrusted(java.security.cert.X509Certificate[] chain, String authType) {
+                            // Intentionally trust-all for opt-in troubleshooting mode.
+                        }
+
+                        @Override
+                        public void checkServerTrusted(java.security.cert.X509Certificate[] chain, String authType) {
+                            // Intentionally trust-all for opt-in troubleshooting mode.
+                        }
+                    }
+            };
+            SSLContext sslContext = SSLContext.getInstance("TLS");
+            sslContext.init(null, trustAllCerts, new java.security.SecureRandom());
+            return sslContext;
+        } catch (java.security.GeneralSecurityException e) {
+            throw new IllegalStateException("Impossible d'initialiser le mode SSL insecure", e);
+        }
     }
 
     private static String findTitle(String html) {

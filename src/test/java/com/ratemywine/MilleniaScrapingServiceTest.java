@@ -97,9 +97,8 @@ class MilleniaScrapingServiceTest {
         int changedFirstRun = scrapingService.scrapeAndSync(startUrl, 60);
 
         long expectedWinePages = firstPageWinePaths.size() + 1L;
-        long expectedRows = expectedWinePages * 9L;
-        Assertions.assertEquals(expectedRows, changedFirstRun);
-        Assertions.assertEquals(expectedRows, milleniaRepository.count());
+        Assertions.assertEquals(expectedWinePages, changedFirstRun);
+        Assertions.assertEquals(expectedWinePages, milleniaRepository.count());
 
         Set<String> scrapedUrls = milleniaRepository.findAll().stream()
                 .map(Millenia::getPageUrl)
@@ -111,28 +110,58 @@ class MilleniaScrapingServiceTest {
         Assertions.assertEquals((long) firstPageWinePaths.size(), firstPageScraped);
         Assertions.assertTrue(scrapedUrls.contains(baseUrl + PAGE_2_WINE_PATH));
 
-        List<Millenia> lynchBagesRows = milleniaRepository.findAll().stream()
-                .filter(row -> (baseUrl + PAGE_2_WINE_PATH).equals(row.getPageUrl()))
-                .collect(Collectors.toList());
-        Assertions.assertEquals(9, lynchBagesRows.size());
-        Assertions.assertTrue(lynchBagesRows.stream().allMatch(row -> row.getWineName().contains("Lynch-Bages 2016")));
-
-        Millenia parker = milleniaRepository.findByPageUrlAndSourceKey(baseUrl + PAGE_2_WINE_PATH, "wine_advocate")
+        Millenia lynchBages = milleniaRepository.findFirstByPageUrl(baseUrl + PAGE_2_WINE_PATH)
                 .orElseThrow();
-        Assertions.assertEquals("97+", parker.getRatingValue());
-        Assertions.assertEquals("100", parker.getRatingScale());
+        Assertions.assertTrue(lynchBages.getWineName().contains("Lynch-Bages 2016"));
+        Assertions.assertTrue(lynchBages.getNom() != null && lynchBages.getNom().contains("Lynch-Bages"));
+        Assertions.assertEquals(Integer.valueOf(2016), lynchBages.getMillesime());
+        Assertions.assertEquals("97+/100", lynchBages.getRatingParker());
+        Assertions.assertEquals("17+/20", lynchBages.getRatingJancisRobinson());
+        Assertions.assertEquals(Integer.valueOf(9), lynchBages.getRatingsCount());
+        Assertions.assertEquals(9, countFilledRatings(lynchBages));
 
-        Millenia robinson = milleniaRepository.findByPageUrlAndSourceKey(baseUrl + PAGE_2_WINE_PATH, "jancis_robinson")
-                .orElseThrow();
-        Assertions.assertEquals("17+", robinson.getRatingValue());
-        Assertions.assertEquals("20", robinson.getRatingScale());
-
-        OffsetDateTime parkerScrapedAt = parker.getScrapedAt();
+        OffsetDateTime lynchBagesScrapedAt = lynchBages.getScrapedAt();
         int changedSecondRun = scrapingService.scrapeAndSync(startUrl, 60);
         Assertions.assertEquals(0, changedSecondRun);
-        Millenia parkerReloaded = milleniaRepository.findByPageUrlAndSourceKey(baseUrl + PAGE_2_WINE_PATH, "wine_advocate")
+        Millenia lynchBagesReloaded = milleniaRepository.findFirstByPageUrl(baseUrl + PAGE_2_WINE_PATH)
                 .orElseThrow();
-        Assertions.assertEquals(parkerScrapedAt, parkerReloaded.getScrapedAt());
+        Assertions.assertEquals(lynchBagesScrapedAt, lynchBagesReloaded.getScrapedAt());
+    }
+
+    private static int countFilledRatings(Millenia row) {
+        int count = 0;
+        if (isFilled(row.getRatingParker())) {
+            count++;
+        }
+        if (isFilled(row.getRatingJancisRobinson())) {
+            count++;
+        }
+        if (isFilled(row.getRatingDecanter())) {
+            count++;
+        }
+        if (isFilled(row.getRatingWineSpectator())) {
+            count++;
+        }
+        if (isFilled(row.getRatingJamesSuckling())) {
+            count++;
+        }
+        if (isFilled(row.getRatingVinousAntonioGalloni())) {
+            count++;
+        }
+        if (isFilled(row.getRatingVinousNealMartin())) {
+            count++;
+        }
+        if (isFilled(row.getRatingFigaro())) {
+            count++;
+        }
+        if (isFilled(row.getRatingTheWineIndependent())) {
+            count++;
+        }
+        return count;
+    }
+
+    private static boolean isFilled(String value) {
+        return value != null && !value.isBlank();
     }
 
     private String buildSecondPageListingHtml() {
