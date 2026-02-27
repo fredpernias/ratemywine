@@ -1,18 +1,38 @@
-# RateMyWine – collecte programmatique de notes critiques (Java)
+# RateMyWine – collecte programmatique de notes critiques (Java + Spring Boot)
 
-Ce dépôt contient désormais des programmes **Java** pour automatiser la récupération de notes (Parker, Hachette, etc.) à partir d'une liste de vins ou via crawl d'un site.
+Ce dépôt contient désormais des programmes **Java** pour automatiser la récupération de notes (Parker, Hachette, etc.) à partir d'une liste de vins ou via crawl d'un site, avec une base **Maven/Spring Boot** prête pour persister en PostgreSQL.
 
 > ⚠️ Important : vérifiez les CGU/robots.txt des sites interrogés avant un usage intensif.
 
 ## Prérequis
 
-- Java 17+ installé (`java`, `javac`)
+- Java 17+
+- Maven 3.9+
+- PostgreSQL local avec une base `ratemywine`
 
-## Compilation
+## Lancement du projet Maven
 
 ```bash
-mkdir -p out
-javac -d out src/main/java/com/ratemywine/*.java
+export DB_USER=postgres
+export DB_PASSWORD=postgres
+mvn spring-boot:run
+```
+
+La connexion PostgreSQL est configurée via :
+
+```properties
+spring.datasource.url=jdbc:postgresql://localhost:5432/ratemywine
+spring.datasource.username=${DB_USER}
+spring.datasource.password=${DB_PASSWORD}
+spring.datasource.driver-class-name=org.postgresql.Driver
+```
+
+L'entité JPA `Wine` est mappée sur la table `wines`.
+
+## Build
+
+```bash
+mvn clean package
 ```
 
 ## 1) Collecte depuis un CSV d'entrée
@@ -25,10 +45,11 @@ Chateau Margaux,Margaux,2015
 Domaine de la Romanee-Conti,Romanee-Conti,2018
 ```
 
-Exécution :
+Exécution (classe utilitaire existante) :
 
 ```bash
-java -cp out com.ratemywine.CollectRatings --input wines.csv --output ratings.csv
+mvn -q -DskipTests package
+java -cp target/classes com.ratemywine.CollectRatings --input wines.csv --output ratings.csv
 ```
 
 Options utiles :
@@ -49,7 +70,8 @@ Sortie :
 Exécution :
 
 ```bash
-java -cp out com.ratemywine.MilleniumWineRatingsScraper "https://www.exemple.com/tous-nos-vins"
+mvn -q -DskipTests package
+java -cp target/classes com.ratemywine.MilleniumWineRatingsScraper "https://www.exemple.com/tous-nos-vins"
 ```
 
 Options :
