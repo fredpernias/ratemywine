@@ -1,4 +1,4 @@
-﻿package com.ratemywine;
+package com.ratemywine;
 
 import com.ratemywine.model.Millenia;
 import com.ratemywine.repository.MilleniaRepository;
@@ -45,7 +45,9 @@ import org.springframework.test.context.TestPropertySource;
         "spring.datasource.driver-class-name=org.postgresql.Driver",
         "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect",
         "spring.jpa.hibernate.ddl-auto=none",
-        "spring.jpa.show-sql=false"
+        "spring.jpa.show-sql=false",
+        "ratemywine.scraper.min-delay-seconds=0",
+        "ratemywine.scraper.max-delay-seconds=0"
 })
 class MilleniaLiveWebPostgresTest {
     private static final String AGGREGATE_SOURCE_KEY = "aggregated_ratings";

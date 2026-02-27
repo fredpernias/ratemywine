@@ -10,10 +10,11 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class MilleniaScrapingService {
@@ -21,8 +22,6 @@ public class MilleniaScrapingService {
     private static final String DEFAULT_USER_AGENT =
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
                     "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
-    private static final double DEFAULT_MIN_DELAY_SECONDS = 0.5;
-    private static final double DEFAULT_MAX_DELAY_SECONDS = 2.0;
     private static final Pattern YEAR_RE = Pattern.compile("(?:19|20)\\d{2}");
     private static final String AGGREGATE_SOURCE_KEY = "aggregated_ratings";
     private static final String AGGREGATE_SOURCE_NAME = "Aggregated ratings";
@@ -42,53 +41,63 @@ public class MilleniaScrapingService {
     );
 
     private final MilleniaRepository milleniaRepository;
+    private final double minDelaySeconds;
+    private final double maxDelaySeconds;
 
-    public MilleniaScrapingService(MilleniaRepository milleniaRepository) {
+    public MilleniaScrapingService(
+            MilleniaRepository milleniaRepository,
+            @Value("${ratemywine.scraper.min-delay-seconds:0.5}") double minDelaySeconds,
+            @Value("${ratemywine.scraper.max-delay-seconds:2.0}") double maxDelaySeconds
+    ) {
         this.milleniaRepository = milleniaRepository;
+        this.minDelaySeconds = Math.max(0.0, minDelaySeconds);
+        this.maxDelaySeconds = Math.max(this.minDelaySeconds, maxDelaySeconds);
     }
 
-    @Transactional
     public int scrapeAndSyncMillesimaAllWines(int maxPages) throws InterruptedException {
         return scrapeAndSync(MilleniumWineRatingsScraper.DEFAULT_MILLESIMA_START_URL, maxPages);
     }
 
-    @Transactional
     public int scrapeAndSync(String startUrl, int maxPages) throws InterruptedException {
-        List<MilleniumWineRatingsScraper.WineRating> rawRatings = MilleniumWineRatingsScraper
-                .scrape(startUrl, maxPages, DEFAULT_MIN_DELAY_SECONDS, DEFAULT_MAX_DELAY_SECONDS, 20, DEFAULT_USER_AGENT);
-        Map<String, List<MilleniumWineRatingsScraper.WineRating>> ratingsByUrl = new LinkedHashMap<>();
-        for (MilleniumWineRatingsScraper.WineRating rating : rawRatings) {
-            if (rating.url() == null || rating.url().isBlank()) {
-                continue;
-            }
-            ratingsByUrl.computeIfAbsent(rating.url(), ignored -> new ArrayList<>()).add(rating);
+        AtomicInteger changedRows = new AtomicInteger();
+        MilleniumWineRatingsScraper.scrape(
+                startUrl,
+                maxPages,
+                minDelaySeconds,
+                maxDelaySeconds,
+                20,
+                DEFAULT_USER_AGENT,
+                (pageUrl, wineName, pageRatings) -> changedRows.addAndGet(
+                        upsertScrapedWinePage(pageUrl, wineName, pageRatings)
+                )
+        );
+        return changedRows.get();
+    }
+
+    private int upsertScrapedWinePage(
+            String pageUrl,
+            String scrapedWineName,
+            List<MilleniumWineRatingsScraper.WineRating> ratings
+    ) {
+        String wineName = resolveWineName(ratings, pageUrl, scrapedWineName);
+        WineIdentity identity = extractWineIdentity(wineName, pageUrl);
+        AggregatedRatings aggregatedRatings = aggregateRatings(ratings);
+
+        List<Millenia> existingRows = milleniaRepository.findAllByPageUrl(pageUrl);
+        Millenia entity = existingRows.isEmpty() ? new Millenia() : existingRows.get(0);
+        boolean duplicatesRemoved = false;
+        if (existingRows.size() > 1) {
+            milleniaRepository.deleteAll(existingRows.subList(1, existingRows.size()));
+            duplicatesRemoved = true;
         }
 
-        int changedRows = 0;
-        for (Map.Entry<String, List<MilleniumWineRatingsScraper.WineRating>> entry : ratingsByUrl.entrySet()) {
-            String pageUrl = entry.getKey();
-            List<MilleniumWineRatingsScraper.WineRating> ratings = entry.getValue();
-            String wineName = resolveWineName(ratings, pageUrl);
-            WineIdentity identity = extractWineIdentity(wineName, pageUrl);
-            AggregatedRatings aggregatedRatings = aggregateRatings(ratings);
-
-            List<Millenia> existingRows = milleniaRepository.findAllByPageUrl(pageUrl);
-            Millenia entity = existingRows.isEmpty() ? new Millenia() : existingRows.get(0);
-            boolean duplicatesRemoved = false;
-            if (existingRows.size() > 1) {
-                milleniaRepository.deleteAll(existingRows.subList(1, existingRows.size()));
-                duplicatesRemoved = true;
-            }
-
-            if (!duplicatesRemoved && !hasDiff(entity, pageUrl, wineName, identity, aggregatedRatings)) {
-                continue;
-            }
-
-            applyAggregatedState(entity, pageUrl, wineName, identity, aggregatedRatings);
-            milleniaRepository.save(entity);
-            changedRows++;
+        if (!duplicatesRemoved && !hasDiff(entity, pageUrl, wineName, identity, aggregatedRatings)) {
+            return 0;
         }
-        return changedRows;
+
+        applyAggregatedState(entity, pageUrl, wineName, identity, aggregatedRatings);
+        milleniaRepository.save(entity);
+        return 1;
     }
 
     private void applyAggregatedState(
@@ -258,12 +267,16 @@ public class MilleniaScrapingService {
         return score;
     }
 
-    private String resolveWineName(List<MilleniumWineRatingsScraper.WineRating> ratings, String pageUrl) {
+    private String resolveWineName(List<MilleniumWineRatingsScraper.WineRating> ratings, String pageUrl, String scrapedWineName) {
         for (MilleniumWineRatingsScraper.WineRating rating : ratings) {
             String wineName = normalizeToken(rating.wineName());
             if (wineName != null && !"Titre inconnu".equalsIgnoreCase(wineName)) {
                 return wineName;
             }
+        }
+        String normalizedScrapedName = normalizeToken(scrapedWineName);
+        if (normalizedScrapedName != null && !"Titre inconnu".equalsIgnoreCase(normalizedScrapedName)) {
+            return normalizedScrapedName;
         }
         return deriveNameFromUrl(pageUrl, extractYear(pageUrl));
     }

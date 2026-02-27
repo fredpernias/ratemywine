@@ -1,4 +1,4 @@
-﻿package com.ratemywine;
+package com.ratemywine;
 
 import java.io.BufferedWriter;
 import java.io.IOException;
@@ -109,9 +109,15 @@ public final class MilleniumWineRatingsScraper {
 
     public static List<WineRating> scrape(String startUrl, int maxPages, double minDelay, double maxDelay,
                                           int timeoutSeconds, String userAgent) throws InterruptedException {
+        return scrape(startUrl, maxPages, minDelay, maxDelay, timeoutSeconds, userAgent, null);
+    }
+
+    public static List<WineRating> scrape(String startUrl, int maxPages, double minDelay, double maxDelay,
+                                          int timeoutSeconds, String userAgent, WinePageListener listener)
+            throws InterruptedException {
         CliArgs cli = new CliArgs(startUrl, maxPages, minDelay, maxDelay, timeoutSeconds,
                 "wine_ratings.csv", "wine_ratings.json", userAgent, "target/millesima-crawl.state.bin");
-        return crawlAndExtract(cli);
+        return crawlAndExtract(cli, listener);
     }
 
     public static void main(String[] args) throws Exception {
@@ -121,7 +127,7 @@ public final class MilleniumWineRatingsScraper {
             System.exit(2);
         }
 
-        List<WineRating> ratings = crawlAndExtract(cli);
+        List<WineRating> ratings = crawlAndExtract(cli, null);
         writeOutputs(ratings, Path.of(cli.csvPath), Path.of(cli.jsonPath));
 
         System.out.println("Terminé. " + ratings.size() + " note(s) extraite(s).");
@@ -129,7 +135,7 @@ public final class MilleniumWineRatingsScraper {
         System.out.println("JSON: " + cli.jsonPath);
     }
 
-    private static List<WineRating> crawlAndExtract(CliArgs cli) throws InterruptedException {
+    private static List<WineRating> crawlAndExtract(CliArgs cli, WinePageListener listener) throws InterruptedException {
         URI start = URI.create(cli.startUrl);
         String domain = start.getHost();
         String normalizedStartUrl = normalizeUrl(cli.startUrl, cli.startUrl);
@@ -145,10 +151,13 @@ public final class MilleniumWineRatingsScraper {
         });
         Runtime.getRuntime().addShutdownHook(shutdownHook);
         try {
+            if (listener != null && state.resumedFromState) {
+                replayScrapedPagesToListener(state, listener);
+            }
             if (state.mode == CrawlMode.LISTING_START) {
-                crawlFromListingStart(cli, domain, state, statePath);
+                crawlFromListingStart(cli, domain, state, statePath, listener);
             } else {
-                crawlWithGlobalPageCap(cli, domain, state, statePath);
+                crawlWithGlobalPageCap(cli, domain, state, statePath, listener);
             }
             completed.set(true);
             deleteStateFile(statePath);
@@ -162,7 +171,8 @@ public final class MilleniumWineRatingsScraper {
         }
     }
 
-    private static void crawlWithGlobalPageCap(CliArgs cli, String domain, CrawlState state, Path statePath)
+    private static void crawlWithGlobalPageCap(CliArgs cli, String domain, CrawlState state, Path statePath,
+                                               WinePageListener listener)
             throws InterruptedException {
         Random random = new Random();
 
@@ -180,10 +190,16 @@ public final class MilleniumWineRatingsScraper {
                 continue;
             }
 
-            List<WineRating> pageRatings = extractRatingsFromWinePage(html, url);
-            if (!pageRatings.isEmpty()) {
-                state.ratings.addAll(pageRatings);
-                System.err.println("  -> " + pageRatings.size() + " note(s) detectee(s)");
+            ScrapedWinePage scrapedPage = extractScrapedWinePage(html, url);
+            if (scrapedPage != null) {
+                state.recordScrapedPage(scrapedPage);
+                if (listener != null) {
+                    listener.onWinePageScraped(scrapedPage.url(), scrapedPage.wineName(), scrapedPage.ratings());
+                }
+                if (!scrapedPage.ratings().isEmpty()) {
+                    state.ratings.addAll(scrapedPage.ratings());
+                    System.err.println("  -> " + scrapedPage.ratings().size() + " note(s) detectee(s)");
+                }
             }
 
             for (String link : extractInternalLinks(html, url, domain)) {
@@ -195,7 +211,8 @@ public final class MilleniumWineRatingsScraper {
         }
     }
 
-    private static void crawlFromListingStart(CliArgs cli, String domain, CrawlState state, Path statePath)
+    private static void crawlFromListingStart(CliArgs cli, String domain, CrawlState state, Path statePath,
+                                              WinePageListener listener)
             throws InterruptedException {
         Random random = new Random();
 
@@ -242,10 +259,16 @@ public final class MilleniumWineRatingsScraper {
                 continue;
             }
 
-            List<WineRating> pageRatings = extractRatingsFromWinePage(wineHtml, wineUrl);
-            if (!pageRatings.isEmpty()) {
-                state.ratings.addAll(pageRatings);
-                System.err.println("  -> " + pageRatings.size() + " note(s) detectee(s)");
+            ScrapedWinePage scrapedPage = extractScrapedWinePage(wineHtml, wineUrl);
+            if (scrapedPage != null) {
+                state.recordScrapedPage(scrapedPage);
+                if (listener != null) {
+                    listener.onWinePageScraped(scrapedPage.url(), scrapedPage.wineName(), scrapedPage.ratings());
+                }
+                if (!scrapedPage.ratings().isEmpty()) {
+                    state.ratings.addAll(scrapedPage.ratings());
+                    System.err.println("  -> " + scrapedPage.ratings().size() + " note(s) detectee(s)");
+                }
             }
 
             for (String vintageUrl : extractWineVintageLinks(wineHtml, wineUrl, domain)) {
@@ -270,9 +293,9 @@ public final class MilleniumWineRatingsScraper {
         }
     }
 
-    private static List<WineRating> extractRatingsFromWinePage(String html, String pageUrl) {
+    private static ScrapedWinePage extractScrapedWinePage(String html, String pageUrl) {
         if (isLikelyListingPage(pageUrl, html)) {
-            return List.of();
+            return null;
         }
         String title = findTitle(html);
         String text = stripTags(html);
@@ -287,13 +310,23 @@ public final class MilleniumWineRatingsScraper {
                 pageRatings = extractRatingsFromText(text, pageUrl, title);
             }
         }
-        return dedupeRatings(pageRatings);
+        return new ScrapedWinePage(pageUrl, title, dedupeRatings(pageRatings));
+    }
+
+    private static List<WineRating> extractRatingsFromWinePage(String html, String pageUrl) {
+        ScrapedWinePage scraped = extractScrapedWinePage(html, pageUrl);
+        if (scraped == null) {
+            return List.of();
+        }
+        return scraped.ratings();
     }
 
     private static CrawlState loadOrCreateState(Path statePath, String startUrl, String domain, int maxPages, boolean listingStart) {
         if (Files.exists(statePath)) {
             CrawlState loaded = loadState(statePath);
             if (loaded != null && loaded.isCompatible(startUrl, domain, maxPages)) {
+                loaded.resumedFromState = true;
+                loaded.ensureInitialized();
                 System.err.println("Reprise du crawl depuis l'etat: " + statePath);
                 return loaded;
             }
@@ -305,6 +338,7 @@ public final class MilleniumWineRatingsScraper {
         state.domain = domain;
         state.maxPages = maxPages;
         state.mode = listingStart ? CrawlMode.LISTING_START : CrawlMode.GLOBAL;
+        state.ensureInitialized();
         if (listingStart) {
             state.listingQueue.add(startUrl);
             state.queuedListingUrls.add(startUrl);
@@ -320,6 +354,7 @@ public final class MilleniumWineRatingsScraper {
         try (ObjectInputStream in = new ObjectInputStream(Files.newInputStream(statePath))) {
             Object loaded = in.readObject();
             if (loaded instanceof CrawlState state) {
+                state.ensureInitialized();
                 return state;
             }
             return null;
@@ -348,6 +383,22 @@ public final class MilleniumWineRatingsScraper {
             Files.deleteIfExists(statePath);
         } catch (IOException e) {
             System.err.println("Impossible de supprimer l'etat de crawl: " + e.getMessage());
+        }
+    }
+
+    private static void replayScrapedPagesToListener(CrawlState state, WinePageListener listener) {
+        int replayed = 0;
+        for (Map.Entry<String, ScrapedWinePageState> entry : state.scrapedPagesByUrl.entrySet()) {
+            ScrapedWinePageState savedPage = entry.getValue();
+            String wineName = savedPage == null ? "Titre inconnu" : savedPage.wineName;
+            List<WineRating> ratings = savedPage == null || savedPage.ratings == null
+                    ? List.of()
+                    : List.copyOf(savedPage.ratings);
+            listener.onWinePageScraped(entry.getKey(), wineName, ratings);
+            replayed++;
+        }
+        if (replayed > 0) {
+            System.err.println("Reconciliation BDD: " + replayed + " page(s) vin rejouee(s) depuis l'etat.");
         }
     }
 
@@ -976,6 +1027,28 @@ public final class MilleniumWineRatingsScraper {
         private static final long serialVersionUID = 1L;
     }
 
+    public interface WinePageListener {
+        void onWinePageScraped(String pageUrl, String wineName, List<WineRating> pageRatings);
+    }
+
+    private record ScrapedWinePage(String url, String wineName, List<WineRating> ratings) {}
+
+    private static final class ScrapedWinePageState implements Serializable {
+        private static final long serialVersionUID = 1L;
+
+        private String wineName;
+        private List<WineRating> ratings;
+
+        private ScrapedWinePageState() {
+            // For Java serialization
+        }
+
+        private ScrapedWinePageState(String wineName, List<WineRating> ratings) {
+            this.wineName = wineName;
+            this.ratings = ratings == null ? List.of() : new ArrayList<>(ratings);
+        }
+    }
+
     private record RatingScore(String value, String scale) {}
 
     private record SourcePattern(String key, String label, String type, String defaultScale,
@@ -1000,6 +1073,7 @@ public final class MilleniumWineRatingsScraper {
         private String startUrl;
         private String domain;
         private int maxPages;
+        private boolean resumedFromState;
 
         private final Queue<String> globalQueue = new ArrayDeque<>();
         private final Set<String> seenGlobalUrls = new HashSet<>();
@@ -1014,11 +1088,23 @@ public final class MilleniumWineRatingsScraper {
         private final Set<String> queuedWineUrls = new HashSet<>();
 
         private final List<WineRating> ratings = new ArrayList<>();
+        private Map<String, ScrapedWinePageState> scrapedPagesByUrl = new java.util.LinkedHashMap<>();
+
+        private void recordScrapedPage(ScrapedWinePage page) {
+            ensureInitialized();
+            scrapedPagesByUrl.put(page.url(), new ScrapedWinePageState(page.wineName(), page.ratings()));
+        }
 
         private boolean isCompatible(String expectedStartUrl, String expectedDomain, int expectedMaxPages) {
             return Objects.equals(startUrl, expectedStartUrl)
                     && Objects.equals(domain, expectedDomain)
                     && maxPages == expectedMaxPages;
+        }
+
+        private void ensureInitialized() {
+            if (scrapedPagesByUrl == null) {
+                scrapedPagesByUrl = new java.util.LinkedHashMap<>();
+            }
         }
     }
 
