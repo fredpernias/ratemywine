@@ -71,6 +71,13 @@ public final class MilleniumWineRatingsScraper {
 
     private MilleniumWineRatingsScraper() {}
 
+    public static List<WineRating> scrape(String startUrl, int maxPages, double minDelay, double maxDelay,
+                                          int timeoutSeconds, String userAgent) throws InterruptedException {
+        CliArgs cli = new CliArgs(startUrl, maxPages, minDelay, maxDelay, timeoutSeconds,
+                Path.of("wine_ratings.csv"), Path.of("wine_ratings.json"), userAgent);
+        return crawlAndExtract(cli);
+    }
+
     public static void main(String[] args) throws Exception {
         CliArgs cli = CliArgs.parse(args);
         if (cli.minDelay > cli.maxDelay) {
@@ -367,7 +374,7 @@ public final class MilleniumWineRatingsScraper {
         return s.endsWith("/") ? s.substring(0, s.length() - 1) : s;
     }
 
-    private record WineRating(
+    public record WineRating(
             String url,
             String wineName,
             String sourceKey,
