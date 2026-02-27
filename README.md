@@ -1,29 +1,23 @@
-# RateMyWine – collecte programmatique de notes critiques
+# RateMyWine – collecte programmatique de notes critiques (Java)
 
-Ce dépôt contient un script Python pour **automatiser la récupération de notes** (Parker, Hachette, etc.) à partir d'une liste de vins.
+Ce dépôt contient désormais des programmes **Java** pour automatiser la récupération de notes (Parker, Hachette, etc.) à partir d'une liste de vins ou via crawl d'un site.
 
 > ⚠️ Important : vérifiez les CGU/robots.txt des sites interrogés avant un usage intensif.
 
-## Fonctionnement
+## Prérequis
 
-Le script :
-1. lit un CSV d'entrée (`domaine`, `appellation`, `millesime`),
-2. construit une requête de recherche web ciblant Millésima,
-3. récupère les pages candidats,
-4. extrait les notes des institutions via des patterns textuels,
-5. exporte un CSV enrichi.
+- Java 17+ installé (`java`, `javac`)
 
-## Installation
+## Compilation
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+mkdir -p out
+javac -d out src/main/java/com/ratemywine/*.java
 ```
 
-## Format du CSV d'entrée
+## 1) Collecte depuis un CSV d'entrée
 
-Exemple :
+Format attendu :
 
 ```csv
 domaine,appellation,millesime
@@ -31,10 +25,10 @@ Chateau Margaux,Margaux,2015
 Domaine de la Romanee-Conti,Romanee-Conti,2018
 ```
 
-## Exécution
+Exécution :
 
 ```bash
-python3 scripts/collect_ratings.py --input wines.csv --output ratings.csv
+java -cp out com.ratemywine.CollectRatings --input wines.csv --output ratings.csv
 ```
 
 Options utiles :
@@ -43,17 +37,27 @@ Options utiles :
 - `--sleep 1.2` : pause (secondes) entre requêtes HTTP.
 - `--timeout 15` : timeout HTTP.
 
-## Sortie
-
-Le CSV de sortie contient :
+Sortie :
 
 - colonnes d'origine,
 - `best_url` : URL où une note a été trouvée,
 - `ratings_json` : notes trouvées (JSON compact),
 - `status` : `ok` / `no-rating-found` / `no-candidate-page`.
 
-## Prochaines améliorations
+## 2) Crawl d'un site et extraction des notes
 
-- Ajouter des connecteurs API officiels (quand disponibles).
-- Introduire un matching fuzzy (nom de cuvée précis).
-- Ajouter un mode Playwright pour les pages dynamiques JavaScript.
+Exécution :
+
+```bash
+java -cp out com.ratemywine.MilleniumWineRatingsScraper "https://www.exemple.com/tous-nos-vins"
+```
+
+Options :
+
+- `--max-pages 200`
+- `--min-delay 1.0`
+- `--max-delay 2.0`
+- `--timeout 20`
+- `--csv wine_ratings.csv`
+- `--json wine_ratings.json`
+- `--user-agent "Mozilla/5.0 (compatible; WineRatingsBot/1.0)"`
