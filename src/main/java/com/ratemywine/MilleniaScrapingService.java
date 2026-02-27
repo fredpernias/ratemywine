@@ -3,7 +3,9 @@ package com.ratemywine;
 import com.ratemywine.model.Millenia;
 import com.ratemywine.repository.MilleniaRepository;
 import java.time.OffsetDateTime;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -22,12 +24,21 @@ public class MilleniaScrapingService {
     }
 
     @Transactional
+    public int scrapeAndSyncMillesimaAllWines(int maxPages) throws InterruptedException {
+        return scrapeAndSync(MilleniumWineRatingsScraper.DEFAULT_MILLESIMA_START_URL, maxPages);
+    }
+
+    @Transactional
     public int scrapeAndSync(String startUrl, int maxPages) throws InterruptedException {
-        List<MilleniumWineRatingsScraper.WineRating> ratings = MilleniumWineRatingsScraper
+        List<MilleniumWineRatingsScraper.WineRating> rawRatings = MilleniumWineRatingsScraper
                 .scrape(startUrl, maxPages, 0, 0, 20, DEFAULT_USER_AGENT);
+        Map<String, MilleniumWineRatingsScraper.WineRating> uniqueRatings = new LinkedHashMap<>();
+        for (MilleniumWineRatingsScraper.WineRating rating : rawRatings) {
+            uniqueRatings.putIfAbsent(rating.url() + "|" + rating.sourceKey(), rating);
+        }
 
         int changedRows = 0;
-        for (MilleniumWineRatingsScraper.WineRating rating : ratings) {
+        for (MilleniumWineRatingsScraper.WineRating rating : uniqueRatings.values()) {
             Millenia entity = milleniaRepository.findByPageUrlAndSourceKey(rating.url(), rating.sourceKey())
                     .orElseGet(Millenia::new);
 

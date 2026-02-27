@@ -2,12 +2,21 @@ package com.ratemywine;
 
 import com.ratemywine.model.Millenia;
 import com.ratemywine.repository.MilleniaRepository;
+import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.OffsetDateTime;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
@@ -17,6 +26,11 @@ import org.springframework.boot.test.context.SpringBootTest;
 
 @SpringBootTest
 class MilleniaScrapingServiceTest {
+    private static final Pattern LISTING_ENCODED_WINE_URL_RE = Pattern.compile(
+            "&#34;url&#34;:\\s*&#34;(https://www\\.millesima\\.fr/[^&\\s]+-(?:19|20)\\d{2}(?:-\\d+)?\\.html)&#34;"
+    );
+
+    private static final String PAGE_2_WINE_PATH = "/chateau-lynch-bages-2016.html";
 
     @Autowired
     private MilleniaScrapingService scrapingService;
@@ -25,38 +39,50 @@ class MilleniaScrapingServiceTest {
     private MilleniaRepository milleniaRepository;
 
     private HttpServer server;
+    private int firstPageWineEntriesCount;
+    private Set<String> firstPageWinePaths;
+    private String allWinesHtmlTemplate;
+    private String sampleWinePageHtml;
+    private String baseUrl;
     private String startUrl;
 
     @BeforeEach
     void setUp() throws IOException {
         milleniaRepository.deleteAll();
+        allWinesHtmlTemplate = readResource("allWines.html");
+        sampleWinePageHtml = readResource("sampleWinePage.html");
+        ListingPageWines firstPageWines = extractFirstPageWines(allWinesHtmlTemplate);
+        firstPageWineEntriesCount = firstPageWines.entriesCount();
+        firstPageWinePaths = firstPageWines.uniqueWinePaths();
+
+        Assertions.assertEquals(45, firstPageWineEntriesCount, "Fixture allWines must contain 45 wine entries");
+        Assertions.assertTrue(firstPageWinePaths.size() >= 44, "Fixture should contain at least 44 unique wine URLs");
+        Assertions.assertFalse(firstPageWinePaths.contains(PAGE_2_WINE_PATH));
+
         server = HttpServer.create(new InetSocketAddress(0), 0);
+        server.createContext("/", exchange -> {
+            String path = exchange.getRequestURI().getPath();
+            String query = exchange.getRequestURI().getRawQuery();
 
-        server.createContext("/page-1", exchange -> {
-            String body = """
-                    <html><head><title>Vin Test 1</title></head>
-                    <body>
-                      <h1>Vin Test 1</h1>
-                      <p>Wine Spectator 95/100</p>
-                      <a href=\"/page-2\">Page suivante</a>
-                    </body></html>
-                    """;
-            respond(exchange.getResponseBody(), exchange, body);
-        });
-
-        server.createContext("/page-2", exchange -> {
-            String body = """
-                    <html><head><title>Vin Test 2</title></head>
-                    <body>
-                      <h1>Vin Test 2</h1>
-                      <p>James Suckling 94/100</p>
-                    </body></html>
-                    """;
-            respond(exchange.getResponseBody(), exchange, body);
+            if ("/tous-nos-vins.html".equals(path) && "page=2".equals(query)) {
+                respond(exchange, buildSecondPageListingHtml());
+                return;
+            }
+            if ("/tous-nos-vins.html".equals(path)) {
+                respond(exchange, allWinesHtmlTemplate.replace("https://www.millesima.fr", baseUrl));
+                return;
+            }
+            if (firstPageWinePaths.contains(path) || PAGE_2_WINE_PATH.equals(path)) {
+                respond(exchange, sampleWinePageHtml);
+                return;
+            }
+            exchange.sendResponseHeaders(404, -1);
+            exchange.close();
         });
 
         server.start();
-        startUrl = "http://localhost:" + server.getAddress().getPort() + "/page-1";
+        baseUrl = "http://localhost:" + server.getAddress().getPort();
+        startUrl = baseUrl + "/tous-nos-vins.html";
     }
 
     @AfterEach
@@ -67,29 +93,90 @@ class MilleniaScrapingServiceTest {
     }
 
     @Test
-    void scrapeDeuxPremieresPagesEtSauvegardeUniquementSiDifferent() throws InterruptedException {
-        int changedFirstRun = scrapingService.scrapeAndSync(startUrl, 2);
+    void scrapeAllWinesReads45Page1NavigatesPage2AndParsesNineLynchBagesRatings() throws InterruptedException {
+        int changedFirstRun = scrapingService.scrapeAndSync(startUrl, 60);
 
-        Assertions.assertEquals(2, changedFirstRun);
-        Assertions.assertEquals(2, milleniaRepository.count());
+        long expectedWinePages = firstPageWinePaths.size() + 1L;
+        long expectedRows = expectedWinePages * 9L;
+        Assertions.assertEquals(expectedRows, changedFirstRun);
+        Assertions.assertEquals(expectedRows, milleniaRepository.count());
 
-        Millenia first = milleniaRepository.findByPageUrlAndSourceKey(startUrl, "wine_spectator").orElseThrow();
-        OffsetDateTime firstScrapedAt = first.getScrapedAt();
+        Set<String> scrapedUrls = milleniaRepository.findAll().stream()
+                .map(Millenia::getPageUrl)
+                .collect(Collectors.toSet());
+        long firstPageScraped = firstPageWinePaths.stream()
+                .map(path -> baseUrl + path)
+                .filter(scrapedUrls::contains)
+                .count();
+        Assertions.assertEquals((long) firstPageWinePaths.size(), firstPageScraped);
+        Assertions.assertTrue(scrapedUrls.contains(baseUrl + PAGE_2_WINE_PATH));
 
-        int changedSecondRun = scrapingService.scrapeAndSync(startUrl, 2);
+        List<Millenia> lynchBagesRows = milleniaRepository.findAll().stream()
+                .filter(row -> (baseUrl + PAGE_2_WINE_PATH).equals(row.getPageUrl()))
+                .collect(Collectors.toList());
+        Assertions.assertEquals(9, lynchBagesRows.size());
+        Assertions.assertTrue(lynchBagesRows.stream().allMatch(row -> row.getWineName().contains("Lynch-Bages 2016")));
 
+        Millenia parker = milleniaRepository.findByPageUrlAndSourceKey(baseUrl + PAGE_2_WINE_PATH, "wine_advocate")
+                .orElseThrow();
+        Assertions.assertEquals("97+", parker.getRatingValue());
+        Assertions.assertEquals("100", parker.getRatingScale());
+
+        Millenia robinson = milleniaRepository.findByPageUrlAndSourceKey(baseUrl + PAGE_2_WINE_PATH, "jancis_robinson")
+                .orElseThrow();
+        Assertions.assertEquals("17+", robinson.getRatingValue());
+        Assertions.assertEquals("20", robinson.getRatingScale());
+
+        OffsetDateTime parkerScrapedAt = parker.getScrapedAt();
+        int changedSecondRun = scrapingService.scrapeAndSync(startUrl, 60);
         Assertions.assertEquals(0, changedSecondRun);
-        Assertions.assertEquals(2, milleniaRepository.count());
-
-        Millenia reloaded = milleniaRepository.findByPageUrlAndSourceKey(startUrl, "wine_spectator").orElseThrow();
-        Assertions.assertEquals(firstScrapedAt, reloaded.getScrapedAt());
+        Millenia parkerReloaded = milleniaRepository.findByPageUrlAndSourceKey(baseUrl + PAGE_2_WINE_PATH, "wine_advocate")
+                .orElseThrow();
+        Assertions.assertEquals(parkerScrapedAt, parkerReloaded.getScrapedAt());
     }
 
-    private void respond(OutputStream responseBody, com.sun.net.httpserver.HttpExchange exchange, String body) throws IOException {
+    private String buildSecondPageListingHtml() {
+        return "<!doctype html><html><head>"
+                + "<title>Tous nos vins - page 2</title>"
+                + "<meta name=\"type\" content=\"Listing\" />"
+                + "<link rel=\"canonical\" href=\"" + baseUrl + "/tous-nos-vins.html?page=2\" />"
+                + "</head><body>"
+                + "<script type=\"application/ld+json\">"
+                + "{\"@context\":\"https://schema.org\",\"@type\":\"ItemList\",\"itemListElement\":["
+                + "{\"@type\":\"ListItem\",\"position\":1,\"url\":\"" + baseUrl + PAGE_2_WINE_PATH + "\"}"
+                + "]}"
+                + "</script>"
+                + "</body></html>";
+    }
+
+    private static ListingPageWines extractFirstPageWines(String html) {
+        Matcher matcher = LISTING_ENCODED_WINE_URL_RE.matcher(html);
+        Set<String> paths = new LinkedHashSet<>();
+        int entries = 0;
+        while (matcher.find()) {
+            entries++;
+            paths.add(URI.create(matcher.group(1)).getPath());
+        }
+        return new ListingPageWines(entries, paths);
+    }
+
+    private record ListingPageWines(int entriesCount, Set<String> uniqueWinePaths) {}
+
+    private static String readResource(String name) throws IOException {
+        try (InputStream input = MilleniaScrapingServiceTest.class.getClassLoader().getResourceAsStream(name)) {
+            if (input == null) {
+                throw new IOException("Resource not found: " + name);
+            }
+            return new String(input.readAllBytes(), StandardCharsets.UTF_8);
+        }
+    }
+
+    private void respond(HttpExchange exchange, String body) throws IOException {
         byte[] payload = body.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().add("Content-Type", "text/html; charset=UTF-8");
         exchange.sendResponseHeaders(200, payload.length);
-        responseBody.write(payload);
-        responseBody.close();
+        try (OutputStream responseBody = exchange.getResponseBody()) {
+            responseBody.write(payload);
+        }
     }
 }

@@ -74,7 +74,9 @@ Exécution :
 
 ```bash
 mvn -q -DskipTests package
-java -cp target/classes com.ratemywine.MilleniumWineRatingsScraper "https://www.exemple.com/tous-nos-vins"
+java -cp target/classes com.ratemywine.MilleniumWineRatingsScraper "https://www.millesima.fr/tous-nos-vins.html"
+# ou simplement (utilise cette même URL par défaut)
+java -cp target/classes com.ratemywine.MilleniumWineRatingsScraper
 ```
 
 Options :

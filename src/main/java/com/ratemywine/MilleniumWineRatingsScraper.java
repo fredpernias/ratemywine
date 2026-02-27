@@ -27,8 +27,10 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public final class MilleniumWineRatingsScraper {
+    public static final String DEFAULT_MILLESIMA_START_URL = "https://www.millesima.fr/tous-nos-vins.html";
+
     private static final Pattern RATING_WITH_SCALE_RE = Pattern.compile(
-            "(?:(?:note|notation|rating|score)\\s*[:\\-]?\\s*)?(\\d{1,3}(?:[\\.,]\\d)?)\\s*(?:/\\s*(20|100)|sur\\s*(20|100))",
+            "(?:(?:note|notation|rating|score)\\s*[:\\-]?\\s*)?(\\d{1,3}(?:[\\.,]\\d)?\\+?)\\s*(?:/\\s*(20|100)|sur\\s*(20|100))",
             Pattern.CASE_INSENSITIVE);
     private static final Pattern TITLE_RE = Pattern.compile("<title[^>]*>(.*?)</title>", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
     private static final Pattern H1_RE = Pattern.compile("<h1[^>]*>(.*?)</h1>", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
@@ -37,6 +39,22 @@ public final class MilleniumWineRatingsScraper {
             Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
     private static final Pattern TAG_RE = Pattern.compile("<[^>]+>");
     private static final Pattern HREF_RE = Pattern.compile("<a[^>]*href=[\"']([^\"'#]+)[\"'][^>]*>", Pattern.CASE_INSENSITIVE);
+    private static final Pattern REL_NEXT_LINK_RE = Pattern.compile(
+            "<link[^>]*rel=[\"']next[\"'][^>]*href=[\"']([^\"'#]+)[\"'][^>]*>|<link[^>]*href=[\"']([^\"'#]+)[\"'][^>]*rel=[\"']next[\"'][^>]*>",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern WINE_DETAIL_PATH_RE = Pattern.compile(".+-(?:19|20)\\d{2}(?:-\\d+)?\\.html$", Pattern.CASE_INSENSITIVE);
+    private static final Pattern LISTING_ENCODED_WINE_URL_RE = Pattern.compile(
+            "&#34;url&#34;:\\s*&#34;(https?://[^&\\s]+-(?:19|20)\\d{2}(?:-\\d+)?\\.html)&#34;",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern LISTING_DIRECT_WINE_URL_RE = Pattern.compile(
+            "\"url\"\\s*:\\s*\"(https?://[^\"\\s]+-(?:19|20)\\d{2}(?:-\\d+)?\\.html)\"",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern CRITIC_SLIDE_RE = Pattern.compile(
+            "<div[^>]*WineCriticSlide_container__[^>]*>.*?<span[^>]*WineCriticSlide_name__[^>]*>(.*?)</span>.*?<span[^>]*WineCriticSlide_rating__[^>]*>(.*?)</span>",
+            Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+    private static final Pattern CRITIC_SCORE_RE = Pattern.compile(
+            "(\\d{1,3}(?:[\\.,]\\d+)?\\+?)\\s*/\\s*(20|100)",
+            Pattern.CASE_INSENSITIVE);
     private static final Pattern JSON_RATING_VALUE_RE = Pattern.compile("\\\"ratingValue\\\"\\s*:\\s*\\\"?([0-9]+(?:[.,][0-9]+)?)\\\"?");
     private static final Pattern JSON_BEST_RATING_RE = Pattern.compile("\\\"bestRating\\\"\\s*:\\s*\\\"?([0-9]+)\\\"?");
     private static final Pattern JSON_NAME_RE = Pattern.compile("\\\"name\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
@@ -117,13 +135,21 @@ public final class MilleniumWineRatingsScraper {
                 continue;
             }
 
-            String title = findTitle(html);
-            String text = stripTags(html);
             List<WineRating> pageRatings = new ArrayList<>();
-            pageRatings.addAll(extractRatingsFromJsonLd(html, url, title));
-            pageRatings.addAll(extractRatingsBySource(text, url, title));
-            if (pageRatings.isEmpty()) {
-                pageRatings = extractRatingsFromText(text, url, title);
+            if (!isLikelyListingPage(url, html)) {
+                String title = findTitle(html);
+                String text = stripTags(html);
+                List<WineRating> criticSlideRatings = extractRatingsFromCriticSlides(html, url, title);
+                if (!criticSlideRatings.isEmpty()) {
+                    pageRatings.addAll(criticSlideRatings);
+                } else {
+                    pageRatings.addAll(extractRatingsFromJsonLd(html, url, title));
+                    pageRatings.addAll(extractRatingsBySource(text, url, title));
+                    if (pageRatings.isEmpty()) {
+                        pageRatings = extractRatingsFromText(text, url, title);
+                    }
+                }
+                pageRatings = dedupeRatings(pageRatings);
             }
 
             if (!pageRatings.isEmpty()) {
@@ -227,19 +253,93 @@ public final class MilleniumWineRatingsScraper {
     private static String findTitle(String html) {
         Matcher titleMatch = TITLE_RE.matcher(html);
         if (titleMatch.find()) {
-            String t = stripTags(titleMatch.group(1));
+            String t = normalizeWineTitle(stripTags(titleMatch.group(1)));
             if (!t.isBlank()) {
                 return t;
             }
         }
         Matcher h1Match = H1_RE.matcher(html);
         if (h1Match.find()) {
-            String h = stripTags(h1Match.group(1));
+            String h = normalizeWineTitle(stripTags(h1Match.group(1)));
             if (!h.isBlank()) {
                 return h;
             }
         }
         return "Titre inconnu";
+    }
+
+    private static String normalizeWineTitle(String rawTitle) {
+        return rawTitle.replaceAll("\\s+-\\s+Millesima\\.[^\\s]+$", "").trim();
+    }
+
+    private static List<WineRating> extractRatingsFromCriticSlides(String html, String url, String title) {
+        List<WineRating> found = new ArrayList<>();
+        Matcher slideMatcher = CRITIC_SLIDE_RE.matcher(html);
+        while (slideMatcher.find()) {
+            String sourceName = stripTags(slideMatcher.group(1));
+            String ratingRaw = stripTags(slideMatcher.group(2));
+            if (sourceName.isBlank() || ratingRaw.isBlank()) {
+                continue;
+            }
+            RatingScore score = parseCriticScore(ratingRaw);
+            if (score == null) {
+                continue;
+            }
+            found.add(new WineRating(
+                    url,
+                    title,
+                    criticKeyFromName(sourceName),
+                    sourceName,
+                    "critic",
+                    score.value(),
+                    score.scale(),
+                    "",
+                    "critic-slide"
+            ));
+        }
+        return found;
+    }
+
+    private static RatingScore parseCriticScore(String ratingRaw) {
+        Matcher scoreMatcher = CRITIC_SCORE_RE.matcher(ratingRaw);
+        if (!scoreMatcher.find()) {
+            return null;
+        }
+        String value = scoreMatcher.group(1).replace(',', '.');
+        String scale = scoreMatcher.group(2);
+        return new RatingScore(value, scale);
+    }
+
+    private static String criticKeyFromName(String sourceName) {
+        String normalized = sourceName.toLowerCase(Locale.ROOT).replace("&amp;", "&");
+        if (normalized.contains("parker")) {
+            return "wine_advocate";
+        }
+        if (normalized.contains("robinson")) {
+            return "jancis_robinson";
+        }
+        if (normalized.contains("wine spectator")) {
+            return "wine_spectator";
+        }
+        if (normalized.contains("suckling")) {
+            return "james_suckling";
+        }
+        if (normalized.contains("decanter")) {
+            return "decanter";
+        }
+        if (normalized.contains("vinous") && normalized.contains("neal")) {
+            return "vinous_neal_martin";
+        }
+        if (normalized.contains("vinous") && normalized.contains("galloni")) {
+            return "vinous_antonio_galloni";
+        }
+        if (normalized.contains("the wine independent")) {
+            return "the_wine_independent";
+        }
+        if (normalized.contains("figaro")) {
+            return "figaro";
+        }
+        return normalized.replaceAll("[^a-z0-9]+", "_").replaceAll("^_+|_+$", "");
     }
 
     private static List<WineRating> extractRatingsFromJsonLd(String html, String url, String title) {
@@ -255,6 +355,9 @@ public final class MilleniumWineRatingsScraper {
 
             Matcher best = JSON_BEST_RATING_RE.matcher(scriptBody);
             String bestRating = best.find() ? best.group(1) : "";
+            if (!"20".equals(bestRating) && !"100".equals(bestRating)) {
+                continue;
+            }
 
             Matcher name = JSON_NAME_RE.matcher(scriptBody);
             String wineName = name.find() ? name.group(1) : title;
@@ -281,8 +384,52 @@ public final class MilleniumWineRatingsScraper {
         return found;
     }
 
+    private static List<WineRating> dedupeRatings(List<WineRating> ratings) {
+        List<WineRating> deduped = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (WineRating rating : ratings) {
+            String key = rating.sourceKey() + "|" + rating.ratingValue() + "|" + rating.ratingScale() + "|" + rating.distinction();
+            if (seen.add(key)) {
+                deduped.add(rating);
+            }
+        }
+        return deduped;
+    }
+
     private static Set<String> extractInternalLinks(String html, String baseUrl, String domain) {
         Set<String> links = new LinkedHashSet<>();
+        if (!isLikelyListingPage(baseUrl, html)) {
+            return links;
+        }
+
+        for (String href : extractPaginationLinks(html)) {
+            String normalized = normalizeUrl(baseUrl, href);
+            if (normalized == null) {
+                continue;
+            }
+            URI uri = URI.create(normalized);
+            if (uri.getHost() != null
+                    && uri.getHost().equalsIgnoreCase(domain)
+                    && isLikelyListingPath(uri.getPath())) {
+                links.add(normalized);
+            }
+        }
+        for (String href : extractListingWineLinks(html)) {
+            String normalized = normalizeUrl(baseUrl, href);
+            if (normalized == null) {
+                continue;
+            }
+            URI uri = URI.create(normalized);
+            if (uri.getHost() != null
+                    && uri.getHost().equalsIgnoreCase(domain)
+                    && isLikelyWineDetailPath(uri.getPath())) {
+                links.add(normalized);
+            }
+        }
+        if (!links.isEmpty()) {
+            return links;
+        }
+
         Matcher m = HREF_RE.matcher(html);
         while (m.find()) {
             String href = m.group(1);
@@ -291,11 +438,71 @@ public final class MilleniumWineRatingsScraper {
                 continue;
             }
             URI uri = URI.create(normalized);
-            if (uri.getHost() != null && uri.getHost().equalsIgnoreCase(domain)) {
+            if (uri.getHost() != null
+                    && uri.getHost().equalsIgnoreCase(domain)
+                    && (isLikelyWineDetailPath(uri.getPath()) || isLikelyListingPath(uri.getPath()))) {
                 links.add(normalized);
             }
         }
         return links;
+    }
+
+    private static boolean isLikelyListingPage(String url, String html) {
+        URI uri = URI.create(url);
+        if (isLikelyListingPath(uri.getPath())) {
+            return true;
+        }
+        String lower = html.toLowerCase(Locale.ROOT);
+        return lower.contains("name=\"type\" content=\"listing\"")
+                || lower.contains("name=\"parentgroupidentifier\" content=\"tous-nos-vins\"");
+    }
+
+    private static boolean isLikelyListingPath(String path) {
+        if (path == null || path.isBlank()) {
+            return false;
+        }
+        return path.toLowerCase(Locale.ROOT).endsWith("/tous-nos-vins.html");
+    }
+
+    private static Set<String> extractPaginationLinks(String html) {
+        Set<String> links = new LinkedHashSet<>();
+        Matcher matcher = REL_NEXT_LINK_RE.matcher(html);
+        while (matcher.find()) {
+            String href = firstNonBlank(matcher.group(1), matcher.group(2));
+            if (href != null) {
+                links.add(href);
+            }
+        }
+        return links;
+    }
+
+    private static Set<String> extractListingWineLinks(String html) {
+        Set<String> links = new LinkedHashSet<>();
+        Matcher encoded = LISTING_ENCODED_WINE_URL_RE.matcher(html);
+        while (encoded.find()) {
+            links.add(encoded.group(1));
+        }
+        Matcher direct = LISTING_DIRECT_WINE_URL_RE.matcher(html);
+        while (direct.find()) {
+            links.add(direct.group(1));
+        }
+        return links;
+    }
+
+    private static String firstNonBlank(String... values) {
+        for (String value : values) {
+            if (value != null && !value.isBlank()) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private static boolean isLikelyWineDetailPath(String path) {
+        if (path == null || path.isBlank()) {
+            return false;
+        }
+        return WINE_DETAIL_PATH_RE.matcher(path).matches();
     }
 
     private static String normalizeUrl(String base, String href) {
@@ -421,11 +628,9 @@ public final class MilleniumWineRatingsScraper {
         }
 
         private static CliArgs parse(String[] args) {
-            if (args.length < 1) {
-                throw new IllegalArgumentException("Usage: MilleniumWineRatingsScraper <start_url> [options]");
-            }
-            String startUrl = args[0];
-            Map<String, String> options = ArgParser.toMap(args, 1);
+            boolean hasStartUrl = args.length > 0 && !args[0].startsWith("--");
+            String startUrl = hasStartUrl ? args[0] : DEFAULT_MILLESIMA_START_URL;
+            Map<String, String> options = ArgParser.toMap(args, hasStartUrl ? 1 : 0);
 
             return new CliArgs(
                     startUrl,
