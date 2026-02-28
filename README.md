@@ -88,6 +88,7 @@ Options :
 - `--csv wine_ratings.csv`
 - `--json wine_ratings.json`
 - `--user-agent "Mozilla/5.0 (compatible; WineRatingsBot/1.0)"`
+- `--db-sync true|false` (par défaut `true`, écrit dans `millenia` via les mêmes règles d'agrégation/upsert que `MilleniaScrapingService`)
 
 
 Le scraper `MilleniumWineRatingsScraper` exporte désormais des colonnes détaillées par source:

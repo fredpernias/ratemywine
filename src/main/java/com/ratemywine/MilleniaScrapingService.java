@@ -74,7 +74,7 @@ public class MilleniaScrapingService {
         return changedRows.get();
     }
 
-    private int upsertScrapedWinePage(
+    public int upsertScrapedWinePage(
             String pageUrl,
             String scrapedWineName,
             List<MilleniumWineRatingsScraper.WineRating> ratings

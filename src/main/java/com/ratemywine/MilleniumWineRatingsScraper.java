@@ -27,12 +27,16 @@ import java.util.Queue;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
+import org.springframework.boot.WebApplicationType;
+import org.springframework.boot.builder.SpringApplicationBuilder;
+import org.springframework.context.ConfigurableApplicationContext;
 
 public final class MilleniumWineRatingsScraper {
     public static final String DEFAULT_MILLESIMA_START_URL = "https://www.millesima.fr/tous-nos-vins.html";
@@ -116,7 +120,7 @@ public final class MilleniumWineRatingsScraper {
                                           int timeoutSeconds, String userAgent, WinePageListener listener)
             throws InterruptedException {
         CliArgs cli = new CliArgs(startUrl, maxPages, minDelay, maxDelay, timeoutSeconds,
-                "wine_ratings.csv", "wine_ratings.json", userAgent, "target/millesima-crawl.state.bin");
+                "wine_ratings.csv", "wine_ratings.json", userAgent, "target/millesima-crawl.state.bin", false);
         return crawlAndExtract(cli, listener);
     }
 
@@ -127,12 +131,35 @@ public final class MilleniumWineRatingsScraper {
             System.exit(2);
         }
 
-        List<WineRating> ratings = crawlAndExtract(cli, null);
+        AtomicInteger changedRows = new AtomicInteger();
+        ConfigurableApplicationContext context = null;
+        WinePageListener listener = null;
+        if (cli.dbSync) {
+            context = new SpringApplicationBuilder(RateMyWineApplication.class)
+                    .web(WebApplicationType.NONE)
+                    .run();
+            MilleniaScrapingService scrapingService = context.getBean(MilleniaScrapingService.class);
+            listener = (pageUrl, wineName, pageRatings) -> changedRows.addAndGet(
+                    scrapingService.upsertScrapedWinePage(pageUrl, wineName, pageRatings)
+            );
+        }
+
+        List<WineRating> ratings;
+        try {
+            ratings = crawlAndExtract(cli, listener);
+        } finally {
+            if (context != null) {
+                context.close();
+            }
+        }
         writeOutputs(ratings, Path.of(cli.csvPath), Path.of(cli.jsonPath));
 
         System.out.println("Terminé. " + ratings.size() + " note(s) extraite(s).");
         System.out.println("CSV : " + cli.csvPath);
         System.out.println("JSON: " + cli.jsonPath);
+        if (cli.dbSync) {
+            System.out.println("BDD (millenia) lignes inserees/mises a jour: " + changedRows.get());
+        }
     }
 
     private static List<WineRating> crawlAndExtract(CliArgs cli, WinePageListener listener) throws InterruptedException {
@@ -1118,9 +1145,10 @@ public final class MilleniumWineRatingsScraper {
         private final String jsonPath;
         private final String userAgent;
         private final String statePath;
+        private final boolean dbSync;
 
         private CliArgs(String startUrl, int maxPages, double minDelay, double maxDelay, int timeoutSeconds,
-                        String csvPath, String jsonPath, String userAgent, String statePath) {
+                        String csvPath, String jsonPath, String userAgent, String statePath, boolean dbSync) {
             this.startUrl = startUrl;
             this.maxPages = maxPages;
             this.minDelay = minDelay;
@@ -1130,6 +1158,7 @@ public final class MilleniumWineRatingsScraper {
             this.jsonPath = jsonPath;
             this.userAgent = userAgent;
             this.statePath = statePath;
+            this.dbSync = dbSync;
         }
 
         private static CliArgs parse(String[] args) {
@@ -1146,7 +1175,8 @@ public final class MilleniumWineRatingsScraper {
                     options.getOrDefault("--csv", "wine_ratings.csv"),
                     options.getOrDefault("--json", "wine_ratings.json"),
                     options.getOrDefault("--user-agent", "Mozilla/5.0 (compatible; WineRatingsBot/1.0)"),
-                    options.getOrDefault("--state-file", "target/millesima-crawl.state.bin")
+                    options.getOrDefault("--state-file", "target/millesima-crawl.state.bin"),
+                    Boolean.parseBoolean(options.getOrDefault("--db-sync", "true"))
             );
         }
     }
