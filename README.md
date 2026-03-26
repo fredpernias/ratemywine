@@ -99,3 +99,23 @@ Le scraper `MilleniumWineRatingsScraper` exporte désormais des colonnes détail
 - `extraction_source`
 
 Sources couvertes: Wine Advocate/Parker, Wine Spectator, Decanter, Wine Enthusiast, Vinous, James Suckling, Jancis Robinson, Falstaff, Hachette, RVF, Bettane+Desseauve, Gilbert & Gaillard, Gambero Rosso, Slow Wine, Guia Peñín, DWWA, IWC, IWSC, CMB, Mundus Vini, Berliner Wine Trophy, Concours Général Agricole, Vinalies Internationales, Challenge International du Vin, MICHELIN Grapes (si présent dans les pages crawlées).
+
+## 3) CorpusToGraph (Java/Swing)
+
+Un mini-projet d'exploration de corpus est disponible dans le package `com.ratemywine.corpustograph`.
+
+Fonctionnalités:
+- sélection d'un répertoire de documents (`.txt`, `.md`, `.html`),
+- calcul des similarités entre documents avec **BM25** ou **TF-IDF cosine**,
+- visualisation force-dirigée type **ressort/particule**,
+  - masse d'une particule = taille du document,
+  - rigidité du ressort = similarité entre deux documents,
+- réglage de la vitesse d'animation,
+- clic sur une particule pour afficher un résumé (titre + extrait court).
+
+Lancer l'application:
+
+```bash
+mvn -q -DskipTests package
+java -cp target/classes com.ratemywine.corpustograph.CorpusToGraphLauncher
+```
